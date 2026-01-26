@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+debug/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Temp
+error.txt
+
+# Agent
+.agent/
+
+input.json
+input1.json
+input2.json
+solver.json

@@ -1,0 +1,19 @@
+[package]
+name = "GINKGO_Dashboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.42"
+eframe = "0.32.0"
+egui = "0.32.3"
+egui-file-dialog = "0.11.0"
+#egui_plot = "0.33.0"
+egui_plot = { git = "https://github.com/upsj/egui_plot.git", branch = "gpe-commits" }
+log = "0.4.28"
+serde = { version = "1.0.226", features = ["derive"] }
+serde_json = "1.0.145"
+simple_logger = "5.0.0"
+thiserror = "1.0"
+anyhow = "1.0"
+smol_str = { version = "0.3.5", features = ["serde"] }
