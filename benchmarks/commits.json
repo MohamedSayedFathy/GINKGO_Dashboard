@@ -1,0 +1,9 @@
+[
+  {
+    "author": "Mohamed Ghayad <mohamed.sayed.ghayad@gmail.com>",
+    "date": "2026-04-22T09:25:42+02:00",
+    "file": "bench_bfa96ba.json",
+    "message": "Add datagen, CI pipeline, WASM deploy, and custom-formula Y-axis",
+    "sha": "bfa96ba22116bdd4a90255455f298da44e246622"
+  }
+]
