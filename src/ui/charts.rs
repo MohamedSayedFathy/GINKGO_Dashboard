@@ -1,5 +1,5 @@
 use crate::data::state::Dashboard;
-use crate::types::{PlotType, ProfileFilter};
+use crate::types::{DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType};
 use crate::visualization::plotting::generate_plot_data;
 use crate::visualization::tooltip::generate_tooltip_text;
 use crate::visualization::utils::format_metric_suffix;
@@ -9,84 +9,124 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+/// A `ProfileFilter` variant whose `f64` payloads are stored as raw bits so
+/// the whole enum is `Hash` + `Eq` without any manual implementation.
+#[derive(Hash, PartialEq, Eq)]
+enum CacheKeyProfileFilter {
+    None,
+    MaxTau(u64),
+    TrimPercent(u64),
+}
+
+impl From<ProfileFilter> for CacheKeyProfileFilter {
+    fn from(f: ProfileFilter) -> Self {
+        match f {
+            ProfileFilter::None => Self::None,
+            ProfileFilter::MaxTau(v) => Self::MaxTau(v.to_bits()),
+            ProfileFilter::TrimPercent(v) => Self::TrimPercent(v.to_bits()),
+        }
+    }
+}
+
+/// All fields that influence plot output, hashable via `derive(Hash)`.
+///
+/// `active_formats` is stored as a sorted `Vec` so that `Hash` is order-stable.
+#[derive(Hash)]
+struct CacheKey {
+    mode: Option<DataMode>,
+    active_dataset: Vec<String>,
+    active_formats: Vec<(DataFormat, bool)>,
+    x_axis: Option<XaxisType>,
+    data_metric: Option<MetricType>,
+    baseline_format: DataFormat,
+    plot_type: PlotType,
+    normalize: bool,
+    profile_filter: CacheKeyProfileFilter,
+    filter_outliers: bool,
+    log_scale_x: bool,
+    show_percentile_bands: bool,
+    /// Source text of the active custom formula, or `None` when not in Custom mode.
+    custom_formula_src: Option<String>,
+}
+
 pub fn render_charts(app: &mut Dashboard, ui: &mut Ui) {
-    // Generate cache key
+    // Build sorted formats vec for stable hashing.
+    let mut sorted_formats: Vec<(DataFormat, bool)> = app
+        .data_selection
+        .active_formats
+        .iter()
+        .map(|(&k, &v)| (k, v))
+        .collect();
+    sorted_formats.sort_by_key(|(fmt, _)| *fmt);
+
+    let key = CacheKey {
+        mode: app.data_selection.mode,
+        active_dataset: app.data_selection.active_dataset.clone(),
+        active_formats: sorted_formats,
+        x_axis: app.plot_config.x_axis,
+        data_metric: app.plot_config.data_metric,
+        baseline_format: app.plot_config.baseline_format,
+        plot_type: app.plot_config.plot_type,
+        normalize: app.plot_config.normalize,
+        profile_filter: CacheKeyProfileFilter::from(app.plot_config.profile_filter),
+        filter_outliers: app.plot_config.filter_outliers,
+        log_scale_x: app.plot_config.log_scale_x,
+        show_percentile_bands: app.plot_config.show_percentile_bands,
+        custom_formula_src: app
+            .plot_config
+            .custom_formula
+            .as_ref()
+            .map(|f| f.source.clone()),
+    };
+
     let mut hasher = DefaultHasher::new();
-    app.mode.hash(&mut hasher);
-    app.active_dataset.hash(&mut hasher);
+    key.hash(&mut hasher);
+    let cache_key: u64 = hasher.finish();
 
-    let mut sorted_formats: Vec<_> = app.active_formats.iter().map(|(k, v)| (k, *v)).collect();
-    // Use natural ordering (requires Ord on DataFormat)
-    sorted_formats.sort_by(|a, b| a.0.cmp(b.0));
-    for (fmt, active) in sorted_formats {
-        fmt.hash(&mut hasher);
-        active.hash(&mut hasher);
-    }
+    let formula = app.plot_config.custom_formula.as_ref();
 
-    app.x_axis.hash(&mut hasher);
-    app.data_metric.hash(&mut hasher);
-    app.baseline_format.hash(&mut hasher);
-    app.plot_type.hash(&mut hasher);
-    app.normalize.hash(&mut hasher);
-
-    match app.profile_filter {
-        ProfileFilter::None => 0.hash(&mut hasher),
-        ProfileFilter::MaxTau(v) => {
-            1.hash(&mut hasher);
-            v.to_bits().hash(&mut hasher);
-        }
-        ProfileFilter::TrimPercent(v) => {
-            2.hash(&mut hasher);
-            v.to_bits().hash(&mut hasher);
-        }
-    }
-
-    app.filter_outliers.hash(&mut hasher);
-    app.log_scale_x.hash(&mut hasher);
-    app.show_percentile_bands.hash(&mut hasher);
-
-    let cache_key = hasher.finish().to_string();
-
-    let plot_data: Rc<_> = if app.plot_cache_key != cache_key {
+    let plot_data: Rc<_> = if app.plot_cache.key != cache_key {
         let data = generate_plot_data(
-            &app.dataset,
-            &app.active_dataset,
-            &app.active_formats,
-            app.mode,
-            app.x_axis,
-            app.data_metric,
-            app.baseline_format,
-            app.normalize,
-            app.filter_outliers,
-            app.plot_type,
-            app.profile_filter,
-            app.log_scale_x,
-            app.show_percentile_bands,
+            &app.data_selection.dataset,
+            &app.data_selection.active_dataset,
+            &app.data_selection.active_formats,
+            app.data_selection.mode,
+            app.plot_config.x_axis,
+            app.plot_config.data_metric,
+            app.plot_config.baseline_format,
+            app.plot_config.normalize,
+            app.plot_config.filter_outliers,
+            app.plot_config.plot_type,
+            app.plot_config.profile_filter,
+            app.plot_config.log_scale_x,
+            app.plot_config.show_percentile_bands,
+            formula,
         );
 
         let rc_data = Rc::new(data);
-        app.plot_cache_key = cache_key;
-        app.cached_plot_data = Some(Rc::clone(&rc_data));
+        app.plot_cache.key = cache_key;
+        app.plot_cache.data = Some(Rc::clone(&rc_data));
         rc_data
     } else {
-        match app.cached_plot_data.as_ref() {
+        match app.plot_cache.data.as_ref() {
             Some(data) => Rc::clone(data),
             None => {
                 log::warn!("Cache miss despite matching key - regenerating");
                 let data = generate_plot_data(
-                    &app.dataset,
-                    &app.active_dataset,
-                    &app.active_formats,
-                    app.mode,
-                    app.x_axis,
-                    app.data_metric,
-                    app.baseline_format,
-                    app.normalize,
-                    app.filter_outliers,
-                    app.plot_type,
-                    app.profile_filter,
-                    app.log_scale_x,
-                    app.show_percentile_bands,
+                    &app.data_selection.dataset,
+                    &app.data_selection.active_dataset,
+                    &app.data_selection.active_formats,
+                    app.data_selection.mode,
+                    app.plot_config.x_axis,
+                    app.plot_config.data_metric,
+                    app.plot_config.baseline_format,
+                    app.plot_config.normalize,
+                    app.plot_config.filter_outliers,
+                    app.plot_config.plot_type,
+                    app.plot_config.profile_filter,
+                    app.plot_config.log_scale_x,
+                    app.plot_config.show_percentile_bands,
+                    formula,
                 );
                 Rc::new(data)
             }
@@ -97,10 +137,10 @@ pub fn render_charts(app: &mut Dashboard, ui: &mut Ui) {
 
     let plot_id = format!(
         "Benchmark Plot - {:?} - {:?} - {:?}",
-        app.x_axis, app.data_metric, app.plot_type
+        app.plot_config.x_axis, app.plot_config.data_metric, app.plot_config.plot_type
     );
 
-    let current_plot_type = app.plot_type;
+    let current_plot_type = app.plot_config.plot_type;
 
     let mut plot = Plot::new(plot_id)
         .legend(Legend::default())
@@ -109,7 +149,8 @@ pub fn render_charts(app: &mut Dashboard, ui: &mut Ui) {
     // Outlier filtering is now handled in data generation (cached)
     let filtered_series = &plot_data.series;
 
-    let use_log_scale = app.log_scale_x && current_plot_type == PlotType::PerformanceProfile;
+    let use_log_scale =
+        app.plot_config.log_scale_x && current_plot_type == PlotType::PerformanceProfile;
 
     if current_plot_type == PlotType::PerformanceProfile {
         plot = plot
@@ -150,7 +191,7 @@ pub fn render_charts(app: &mut Dashboard, ui: &mut Ui) {
             format!("{}\nX: {:.2}\nY: {:.2}", name, value.x, value.y)
         });
 
-    let is_performance_profile = app.plot_type == PlotType::PerformanceProfile;
+    let is_performance_profile = app.plot_config.plot_type == PlotType::PerformanceProfile;
 
     plot.show(ui, |plot_ui| {
         for series in filtered_series {

@@ -1,3 +1,6 @@
+pub mod git;
+#[cfg(target_arch = "wasm32")]
+pub mod git_http;
 pub mod loader;
 pub mod models;
 pub mod state;
@@ -14,4 +17,7 @@ pub enum AppError {
 
     #[error("Data Logic Error: {0}")]
     Logic(String),
+
+    #[error("Git Error: {0}")]
+    Git(#[from] git::GitError),
 }

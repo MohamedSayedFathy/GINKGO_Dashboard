@@ -1,45 +1,60 @@
-#![allow(dead_code)]
-use serde::Deserialize;
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct BenchmarkOptimal {
-    pub spmv: String,
-}
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BenchmarkOptimal {
+    // Deserialized from JSON; optimal format name reserved for future highlighting.
+    #[allow(dead_code)]
+    pub spmv: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SolverComponents {
+    // Deserialized from JSON; individual component timings reserved for future use.
+    #[allow(dead_code)]
     pub components: HashMap<String, f64>,
     pub time: f64,
     pub iterations: Option<u64>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SolverResult {
     pub recurrent_residuals: Option<Vec<f64>>,
     pub true_residuals: Option<Vec<f64>>,
     pub implicit_residuals: Option<Vec<f64>>,
     pub iteration_timestamps: Option<Vec<f64>>,
+    // Deserialized from JSON; used for normalization in future work.
+    #[allow(dead_code)]
     pub rhs_norm: f64,
     pub generate: SolverComponents,
     pub apply: SolverComponents,
+    // Deserialized from JSON; preconditioner metadata reserved for future display.
+    #[allow(dead_code)]
     pub preconditioner: Value,
+    // Deserialized from JSON; final residual norm reserved for future display.
+    #[allow(dead_code)]
     pub residual_norm: f64,
+    // Deserialized from JSON; repetition count reserved for future averaging.
+    #[allow(dead_code)]
     pub repetitions: u64,
     pub completed: bool,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SolverBenchmark {
     pub stencil: String,
     pub size: u64,
+    pub rows: u64,
+    pub cols: u64,
+    // Deserialized from JSON; optimal format selection reserved for future highlighting.
+    #[allow(dead_code)]
     pub optimal: BenchmarkOptimal,
     pub solver: HashMap<String, SolverResult>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BenchmarkEntry {
     pub storage: Option<u64>,
     pub max_relative_norm2: Option<f64>,
@@ -47,13 +62,14 @@ pub struct BenchmarkEntry {
     pub repetitions: Option<u64>,
     pub completed: bool,
 
-    #[serde(skip_deserializing)]
+    // Computed post-load; not present in real GINKGO JSON output.
+    #[serde(skip)]
     pub gflops_per_second: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub bytes_per_nnz: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub operational_intensity: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub effective_memory_bandwidth: f64,
 }
 
@@ -88,73 +104,104 @@ impl BenchmarkEntry {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MatrixColumnsMetadata {
+    // Deserialized from JSON; distribution stats reserved for future analysis.
+    #[allow(dead_code)]
     pub min: f64,
+    #[allow(dead_code)]
     pub q1: f64,
     pub median: f64,
+    #[allow(dead_code)]
     pub q3: f64,
     pub max: f64,
     pub mean: f64,
     pub variance: f64,
+    #[allow(dead_code)]
     pub skewness: f64,
+    #[allow(dead_code)]
     pub kurtosis: f64,
+    #[allow(dead_code)]
     pub hyperskewness: f64,
+    #[allow(dead_code)]
     pub hyperflatness: f64,
 
-    #[serde(skip_deserializing)]
+    // Computed post-load; not present in real GINKGO JSON output.
+    #[allow(dead_code)]
+    #[serde(skip)]
     pub col_irregularity: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub col_cv: f64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MatrixRowsMetadata {
+    // Deserialized from JSON; distribution stats reserved for future analysis.
+    #[allow(dead_code)]
     pub min: f64,
+    #[allow(dead_code)]
     pub q1: f64,
     pub median: f64,
+    #[allow(dead_code)]
     pub q3: f64,
     pub max: f64,
     pub mean: f64,
     pub variance: f64,
+    #[allow(dead_code)]
     pub skewness: f64,
+    #[allow(dead_code)]
     pub kurtosis: f64,
+    #[allow(dead_code)]
     pub hyperskewness: f64,
+    #[allow(dead_code)]
     pub hyperflatness: f64,
 
-    #[serde(skip_deserializing)]
+    // Computed post-load; not present in real GINKGO JSON output.
+    #[allow(dead_code)]
+    #[serde(skip)]
     pub row_irregularity: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub row_cv: f64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MatrixMetadata {
+    // Deserialized from JSON; matrix registry metadata reserved for future UI display.
+    #[allow(dead_code)]
     pub id: u64,
+    #[allow(dead_code)]
     pub group: SmolStr,
     pub name: SmolStr,
     pub rows: u64,
     pub cols: u64,
     pub nonzeros: u64,
+    #[allow(dead_code)]
     pub real: bool,
+    #[allow(dead_code)]
     pub binary: bool,
     #[serde(rename = "2d3d")]
+    #[allow(dead_code)]
     pub is_2d3d: bool,
+    #[allow(dead_code)]
     pub posdef: bool,
+    #[allow(dead_code)]
     pub psym: f64,
+    #[allow(dead_code)]
     pub nsym: f64,
+    #[allow(dead_code)]
     pub kind: SmolStr,
 
     pub row_distribution: MatrixRowsMetadata,
     pub col_distribution: MatrixColumnsMetadata,
 
-    #[serde(skip_deserializing)]
+    // Computed post-load; not present in real GINKGO JSON output.
+    #[serde(skip)]
     pub sparsity: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub avg_nnz_per_row: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub avg_nnz_per_col: f64,
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub matrix_shape_ratio: f64,
 }
 
@@ -216,15 +263,19 @@ impl MatrixMetadata {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BenchmarkProblem {
+    // Deserialized from JSON; filename used for display in future dataset management.
+    #[allow(dead_code)]
     pub filename: String,
     pub problem: MatrixMetadata,
     pub spmv: HashMap<String, BenchmarkEntry>,
+    // Deserialized from JSON; optimal format reserved for future highlighting.
+    #[allow(dead_code)]
     pub optimal: BenchmarkOptimal,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BenchmarkDataset {
     pub benchmark: Vec<BenchmarkProblem>,
 }

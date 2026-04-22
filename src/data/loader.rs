@@ -7,9 +7,7 @@ const TOLERANCE_THRESHOLD: f64 = 1e-4;
 pub fn process_benchmark_data(
     raw_data: Vec<BenchmarkProblem>,
 ) -> Result<BenchmarkDataset, AppError> {
-    let filtered_raw_data = filter_spmv(raw_data)?;
-
-    let processed_benchmark_data: Result<Vec<BenchmarkProblem>, AppError> = filtered_raw_data
+    let processed_benchmark_data: Result<Vec<BenchmarkProblem>, AppError> = raw_data
         .into_iter()
         .map(|mut problem| {
             let matrix = &mut problem.problem;
@@ -52,10 +50,6 @@ pub fn process_benchmark_data(
 
     let processed_data = processed_benchmark_data?;
     Ok(post_processing(processed_data))
-}
-
-pub fn filter_spmv(dataset: Vec<BenchmarkProblem>) -> Result<Vec<BenchmarkProblem>, AppError> {
-    Ok(dataset)
 }
 
 pub fn post_processing(processed_benchmark: Vec<BenchmarkProblem>) -> BenchmarkDataset {

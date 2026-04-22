@@ -1,0 +1,9 @@
+# Trunk configuration for the wasm build. Defaults are fine for almost
+# everything; we pin `target` and `dist` explicitly so the behaviour is
+# obvious when reading the repo, and set a port for `trunk serve`.
+[build]
+target = "index.html"
+dist   = "dist"
+
+[serve]
+port = 8080

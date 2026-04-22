@@ -4,19 +4,6 @@ use egui::Color32;
 use egui_plot::PlotPoints;
 use std::collections::{HashMap, HashSet};
 
-#[allow(dead_code)]
-/// Configuration options for solver plots.
-///
-/// Controls which data series are displayed and how axes are scaled.
-pub struct SolverPlotOptions {
-    pub show_recurrent: bool,
-    pub show_true: bool,
-    pub show_implicit: bool,
-    pub show_timestamp: bool,
-    pub log_scale: bool,
-    pub x_axis: SolverXAxis,
-}
-
 /// Statistics comparing the current solver against others.
 ///
 /// Used to display relative performance metrics in the UI.

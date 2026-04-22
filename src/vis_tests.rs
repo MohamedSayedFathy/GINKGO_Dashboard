@@ -144,12 +144,11 @@ fn test_profile_counts_failures() {
         Some(MetricType::Time),
         ProfileFilter::None,
         false, // log scale
+        None,  // formula
     );
 
     // Check Series 0
-    if plot_data.series.is_empty() {
-        panic!("Series should not be empty");
-    }
+    assert!(!plot_data.series.is_empty(), "Series should not be empty");
     let series = &plot_data.series[0];
 
     // Series should contain points for the 1 successful problem.

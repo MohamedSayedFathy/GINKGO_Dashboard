@@ -1,0 +1,89 @@
+# Deploys the WASM dashboard to GitHub Pages.
+#
+# ONE-TIME REPO SETUP (cannot be automated — no CLI/API equivalent):
+#   Repo Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
+# Until that is done, the `deploy-pages` step will fail with a permissions
+# error. After flipping it once the site lives at
+#   https://<user>.github.io/GINKGO_Dashboard/
+#
+# Trigger design:
+#   * `push` to main covers normal code changes.
+#   * `workflow_run` after "Benchmark" catches the case where benchmark.yml
+#     commits fresh data back to main with `[skip ci]` — a marker that
+#     suppresses `push` workflows but NOT `workflow_run`. We explicitly
+#     check out `workflow_run.head_sha` so the deployed bundle reflects the
+#     exact commit that benchmark processed.
+#   * `workflow_dispatch` is there for manual re-deploys.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: ["Benchmark"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # For workflow_run, only proceed if the upstream Benchmark run succeeded.
+    # For push / workflow_dispatch the expression is trivially true.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # On `workflow_run` GITHUB_SHA points at the default branch HEAD at
+          # dispatch time, which can race with subsequent pushes. Pin to the
+          # exact SHA the triggering Benchmark run observed. Falls back to
+          # github.sha for `push` / `workflow_dispatch`.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.1
+        with:
+          version: 'latest'
+
+      - name: Build (wasm)
+        run: trunk build --release --public-url /GINKGO_Dashboard/
+
+      - name: Copy benchmarks into dist
+        shell: bash
+        run: |
+          if [ -d benchmarks ]; then
+            mkdir -p dist/benchmarks
+            cp -r benchmarks/. dist/benchmarks/
+          else
+            echo "no benchmarks/ directory to copy; skipping"
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

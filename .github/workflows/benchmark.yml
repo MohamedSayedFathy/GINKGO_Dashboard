@@ -1,0 +1,80 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  datagen:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Extract commit metadata
+        shell: bash
+        run: |
+          SHA=$(git rev-parse HEAD)
+          AUTHOR=$(git log -1 --format='%an <%ae>')
+          DATE=$(git log -1 --format='%cI')
+          MSG=$(git log -1 --format='%s')
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "AUTHOR=$AUTHOR" >> "$GITHUB_ENV"
+          echo "DATE=$DATE" >> "$GITHUB_ENV"
+          echo "MSG=$MSG" >> "$GITHUB_ENV"
+
+      - name: Run datagen (--sha mode)
+        shell: bash
+        run: |
+          cargo run --bin datagen --features datagen --release -- \
+            --out benchmarks \
+            --sha "$SHA" \
+            --author "$AUTHOR" \
+            --date "$DATE" \
+            --message "$MSG"
+
+      - name: Commit and push benchmark data
+        shell: bash
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add benchmarks/
+          if git diff --cached --quiet; then
+            echo "No benchmark changes; skipping commit."
+          else
+            git commit -m "ci(benchmark): data for ${SHA:0:7} [skip ci]"
+            git push
+          fi
+
+      # Emit a clickable dashboard link in the run summary, pre-focused on
+      # this commit via a T9t `v1=<base64url>` state fragment. The URL
+      # resolves once the downstream deploy.yml workflow completes
+      # (a few minutes after this run finishes).
+      - name: Emit dashboard link
+        if: success()
+        shell: bash
+        run: |
+          STATE_JSON=$(printf '{"schema":1,"commit":"%s"}' "$SHA")
+          B64=$(printf '%s' "$STATE_JSON" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+          URL="https://${{ github.repository_owner }}.github.io/GINKGO_Dashboard/#v1=$B64"
+          {
+            echo "### Dashboard"
+            echo ""
+            echo "[View commit ${SHA:0:7}]($URL)"
+          } >> "$GITHUB_STEP_SUMMARY"

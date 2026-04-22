@@ -1,4 +1,5 @@
 use super::filter::{filter_outliers, get_formats_to_plot, FilterStats};
+use super::formula::CompiledFormula;
 use super::math::{calculate_normalized_value, calculate_percentile_bands};
 use super::plotting::{PlotData, PlotSeries, PointMetadata};
 use super::utils::{adjust_color_for_dataset, get_format_color, get_x_value, get_y_value};
@@ -8,6 +9,9 @@ use egui_plot::MarkerShape;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 
+// TODO(task-6): collapse these args into a config struct when the PlotKind
+// abstraction lands (additional plot types task).
+#[allow(clippy::too_many_arguments)]
 pub fn generate_scatter_plot_data(
     dataset: &HashMap<String, BenchmarkDataset>,
     active_dataset: &[String],
@@ -19,6 +23,7 @@ pub fn generate_scatter_plot_data(
     normalize: bool,
     should_filter_outliers: bool,
     show_percentile_bands: bool,
+    formula: Option<&CompiledFormula>,
 ) -> PlotData {
     let mut series_data = Vec::new();
 
@@ -40,8 +45,16 @@ pub fn generate_scatter_plot_data(
             if let Some(ds) = dataset.get(dataset_name) {
                 let mut problem_baselines = HashMap::new();
                 for problem in &ds.benchmark {
-                    if let Some(y_base) = get_y_value(&problem.spmv, &baseline_format, &metric_type)
-                    {
+                    // Baseline entry for normalization is the baseline_format row of this problem.
+                    let bl_entry = problem.spmv.get(baseline_format.as_key());
+                    if let Some(y_base) = get_y_value(
+                        &problem.spmv,
+                        &baseline_format,
+                        &metric_type,
+                        &problem.problem,
+                        bl_entry,
+                        formula,
+                    ) {
                         problem_baselines.insert(problem.problem.name.clone(), y_base);
                     }
                 }
@@ -70,7 +83,16 @@ pub fn generate_scatter_plot_data(
                     filter_stats.total_matrices += 1;
 
                     let x = get_x_value(&problem.problem, x_axis_type);
-                    let raw_y = get_y_value(&problem.spmv, format, &metric_type);
+                    // Baseline entry for Custom formula evaluation (not for normalization).
+                    let baseline_entry = problem.spmv.get(baseline_format.as_key());
+                    let raw_y = get_y_value(
+                        &problem.spmv,
+                        format,
+                        &metric_type,
+                        &problem.problem,
+                        baseline_entry,
+                        formula,
+                    );
 
                     if let Some(mut y_val) = raw_y {
                         if normalize {

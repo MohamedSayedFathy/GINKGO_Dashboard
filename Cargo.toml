@@ -2,18 +2,96 @@
 name = "GINKGO_Dashboard"
 version = "0.1.0"
 edition = "2021"
+default-run = "ginkgo_dashboard"
+
+[lib]
+# The lib is named `ginkgo_dashboard_lib` (not `ginkgo_dashboard`) to avoid a
+# cargo output-filename collision with the `[[bin]] name = "ginkgo_dashboard"`
+# target on Windows (`.pdb`) and Linux (`.so` vs `.` executable). See
+# <https://github.com/rust-lang/cargo/issues/6313>. The name change is purely
+# internal: no user-visible artifact changes.
+name = "ginkgo_dashboard_lib"
+path = "src/lib.rs"
+# `cdylib` is required so `trunk`/`wasm-bindgen` can produce a `.wasm` with
+# the `#[wasm_bindgen(start)]` entry from `src/wasm.rs` exported as the
+# module's `__wbindgen_start`. `rlib` is kept so the native `[[bin]]`
+# targets can still link against this crate.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ginkgo_dashboard"
+path = "src/main.rs"
+
+[[bin]]
+name = "datagen"
+path = "src/bin/datagen.rs"
+required-features = ["datagen"]
+
+[features]
+default = []
+datagen = ["dep:clap", "dep:rand", "dep:rand_chacha", "dep:rand_distr"]
 
 [dependencies]
-chrono = "0.4.42"
+# `wasmbind` makes chrono's `Utc::now()` / `Local::now()` work on wasm32 by
+# delegating to `js-sys::Date`. On native targets the feature is inert (cfg-
+# gated inside chrono) so enabling it unconditionally is safe.
+chrono = { version = "0.4.42", features = ["wasmbind"] }
+# eframe 0.32 does not expose a `web` cargo feature; its wasm deps
+# (`wasm-bindgen`, `wasm-bindgen-futures`, `web-sys`, `web-time`, `js-sys`)
+# are `[target.'cfg(target_arch = "wasm32")'.dependencies]` inside eframe's
+# own Cargo.toml, so wasm support activates automatically on wasm targets
+# without any feature flag here. Default features are left intact to keep
+# native behaviour (wgpu/glow renderer selection) unchanged.
 eframe = "0.32.0"
 egui = "0.32.3"
-egui-file-dialog = "0.11.0"
-#egui_plot = "0.33.0"
-egui_plot = { git = "https://github.com/upsj/egui_plot.git", branch = "gpe-commits" }
+egui_plot = { git = "https://github.com/upsj/egui_plot.git", rev = "7d38a4547dd05b3dbee045f6abab37f8e961f0ff" }
 log = "0.4.28"
 serde = { version = "1.0.226", features = ["derive"] }
 serde_json = "1.0.145"
-simple_logger = "5.0.0"
 thiserror = "1.0"
-anyhow = "1.0"
+# URL-fragment state encoding (T9t). Cross-target: native needs it for the
+# `--state=` CLI flag and wasm needs it for `window.location.hash` decode.
+# `base64` 0.22 compiles on `wasm32-unknown-unknown` without extra features.
+base64 = "0.22"
+exmex = "0.20"
 smol_str = { version = "0.3.5", features = ["serde"] }
+clap = { version = "4", features = ["derive"], optional = true }
+rand = { version = "0.9", optional = true }
+rand_chacha = { version = "0.9", optional = true }
+rand_distr = { version = "0.5", optional = true }
+
+# ----------------------------------------------------------------------------
+# Native-only deps: gix pulls libgit2-style native code and OS file APIs;
+# egui-file-dialog uses `rfd`/native pickers. Neither has a web story today.
+# ----------------------------------------------------------------------------
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+gix = { version = "0.66", default-features = false, features = ["max-performance-safe", "revision"] }
+egui-file-dialog = "0.11.0"
+
+# ----------------------------------------------------------------------------
+# Wasm-only deps. Consumed by `src/wasm.rs` (the `#[wasm_bindgen(start)]`
+# entry) and by wasm-side stubs in `src/data/state.rs`. `web-sys` is not a
+# direct dep: it is re-exported by eframe 0.32 as `eframe::web_sys` and used
+# from there.
+# ----------------------------------------------------------------------------
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "1"
+# `ehttp` gives us a minimal, wasm-friendly HTTP client backed by
+# `web-sys::fetch` on the web target. Used in `src/data/git_http.rs` to
+# populate the commit list from a same-origin `benchmarks/commits.json`
+# when the native gix path is unavailable. Kept wasm-only: native still
+# uses gix for local repo walks.
+ehttp = "0.7"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }

@@ -1,4 +1,5 @@
 pub mod filter;
+pub mod formula;
 pub mod math;
 pub mod plotting;
 pub mod profile;

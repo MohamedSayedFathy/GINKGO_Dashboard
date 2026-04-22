@@ -17,6 +17,9 @@ pub enum ProfileFilter {
     TrimPercent(f64),
 }
 
+// CSR/COO/ELL/HYBRID/SELLP are standard sparse-matrix format acronyms in HPC
+// literature; `Csr`/`Coo` etc. would read worse for the domain.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum DataFormat {
     CSR,
@@ -47,6 +50,7 @@ pub enum MetricType {
     Repetitions,
     OperationalIntensity,
     EffectiveMemoryBandwidth,
+    Custom,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]

@@ -1,5 +1,6 @@
 use crate::data::models::{BenchmarkEntry, MatrixMetadata};
 use crate::types::{DataFormat, MetricType, XaxisType};
+use crate::visualization::formula::CompiledFormula;
 use egui::Color32;
 use std::collections::HashMap;
 
@@ -27,6 +28,9 @@ pub fn get_y_value(
     spmv: &HashMap<String, BenchmarkEntry>,
     format: &DataFormat,
     metric: &MetricType,
+    matrix: &MatrixMetadata,
+    baseline: Option<&BenchmarkEntry>,
+    formula: Option<&CompiledFormula>,
 ) -> Option<f64> {
     let key = format.as_key();
 
@@ -38,6 +42,7 @@ pub fn get_y_value(
             MetricType::GflopsPerSecond => Some(entry.gflops_per_second),
             MetricType::OperationalIntensity => Some(entry.operational_intensity),
             MetricType::EffectiveMemoryBandwidth => Some(entry.effective_memory_bandwidth),
+            MetricType::Custom => formula?.eval(entry, matrix, baseline),
         }
     } else {
         None

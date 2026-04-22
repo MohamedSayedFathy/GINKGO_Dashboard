@@ -3,7 +3,7 @@ use crate::visualization::plotting::PlotSeries;
 use std::collections::HashMap;
 
 /// Statistics about data filtering
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FilterStats {
     pub total_matrices: usize,
     pub shown_matrices: usize,
@@ -11,19 +11,6 @@ pub struct FilterStats {
     pub filtered_no_format_data: usize,
     pub filtered_invalid_values: usize,
     pub filtered_outliers: usize,
-}
-
-impl Default for FilterStats {
-    fn default() -> Self {
-        Self {
-            total_matrices: 0,
-            shown_matrices: 0,
-            filtered_missing_time: 0,
-            filtered_no_format_data: 0,
-            filtered_invalid_values: 0,
-            filtered_outliers: 0,
-        }
-    }
 }
 
 /// Determines which data formats to include in the plot based on mode and active selection.

@@ -26,3 +26,10 @@ input.json
 input1.json
 input2.json
 solver.json
+file.json
+
+# Local datagen output (CI writes to /benchmarks, not /fixtures)
+/fixtures/
+
+# Claude Code local machine settings
+.claude/

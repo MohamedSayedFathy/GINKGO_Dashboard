@@ -1,4 +1,5 @@
 use super::filter::{filter_ratios, get_formats_to_plot, FilterStats};
+use super::formula::CompiledFormula;
 use super::math::{calculate_method_ratios, generate_step_function};
 use super::plotting::{PlotData, PlotSeries};
 use super::utils::{adjust_color_for_dataset, get_format_color, get_y_value};
@@ -9,6 +10,9 @@ use egui_plot::MarkerShape;
 use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
 
+// TODO(task-6): collapse these args into a config struct when the PlotKind
+// abstraction lands (additional plot types task).
+#[allow(clippy::too_many_arguments)]
 pub fn generate_performance_profile_data(
     dataset: &HashMap<String, BenchmarkDataset>,
     active_dataset: &[String],
@@ -17,6 +21,7 @@ pub fn generate_performance_profile_data(
     data_metric: Option<MetricType>,
     profile_filter: ProfileFilter,
     log_scale_x: bool,
+    formula: Option<&CompiledFormula>,
 ) -> PlotData {
     let mut filter_stats = FilterStats::default();
 
@@ -30,6 +35,9 @@ pub fn generate_performance_profile_data(
         }
     };
 
+    // Custom formulas default to higher-is-better. Users expressing a cost
+    // metric (e.g. raw time) should wrap it as a ratio like `baseline_time / time`
+    // to get the expected orientation on the performance profile.
     let lower_is_better = matches!(
         metric_type,
         MetricType::Time | MetricType::Storage | MetricType::Repetitions
@@ -43,6 +51,7 @@ pub fn generate_performance_profile_data(
         &formats_to_plot,
         &metric_type,
         &mut filter_stats,
+        formula,
     );
 
     let mut unique_problems = HashSet::new();
@@ -116,6 +125,7 @@ fn aggregate_problem_results(
     formats_to_plot: &[DataFormat],
     metric_type: &MetricType,
     stats: &mut FilterStats,
+    formula: Option<&CompiledFormula>,
 ) -> HashMap<SmolStr, HashMap<(String, DataFormat), f64>> {
     let mut problem_results: HashMap<SmolStr, HashMap<(String, DataFormat), f64>> = HashMap::new();
 
@@ -125,7 +135,16 @@ fn aggregate_problem_results(
                 let problem_name = problem.problem.name.clone();
                 for format in formats_to_plot {
                     stats.total_matrices += 1;
-                    if let Some(val) = get_y_value(&problem.spmv, format, metric_type) {
+                    // Performance profile has no concept of a "baseline format" for Custom
+                    // formulas — pass None for baseline so baseline_* vars return None.
+                    if let Some(val) = get_y_value(
+                        &problem.spmv,
+                        format,
+                        metric_type,
+                        &problem.problem,
+                        None,
+                        formula,
+                    ) {
                         if val.is_finite() && val > 0.0 {
                             problem_results
                                 .entry(problem_name.clone())

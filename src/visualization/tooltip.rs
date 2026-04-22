@@ -46,11 +46,9 @@ pub fn generate_tooltip_text(
                 let dist_y = (p.y - point.y).abs();
 
                 // Use a strict tolerance (1e-5) to ensure we only show tooltips when hovering exactly over a point.
-                if dist_x < 1e-5 && dist_y < 1e-5 {
-                    if dist_x < min_dist {
-                        min_dist = dist_x;
-                        best_idx = Some(i);
-                    }
+                if dist_x < 1e-5 && dist_y < 1e-5 && dist_x < min_dist {
+                    min_dist = dist_x;
+                    best_idx = Some(i);
                 }
             }
         }

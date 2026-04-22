@@ -1,5 +1,6 @@
 use crate::data::models::BenchmarkDataset;
 use crate::types::{DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType};
+use crate::visualization::formula::CompiledFormula;
 use egui::Color32;
 use egui_plot::MarkerShape;
 use smol_str::SmolStr;
@@ -46,6 +47,9 @@ pub struct PlotData {
     pub filter_stats: FilterStats,
 }
 
+// TODO(task-6): collapse these args into a config struct when the PlotKind
+// abstraction lands (additional plot types task).
+#[allow(clippy::too_many_arguments)]
 pub fn generate_plot_data(
     dataset: &HashMap<String, BenchmarkDataset>,
     active_dataset: &[String],
@@ -60,6 +64,7 @@ pub fn generate_plot_data(
     profile_filter: ProfileFilter,
     log_scale_x: bool,
     show_percentile_bands: bool,
+    formula: Option<&CompiledFormula>,
 ) -> PlotData {
     if matches!(plot_type, PlotType::PerformanceProfile) {
         return generate_performance_profile_data(
@@ -70,6 +75,7 @@ pub fn generate_plot_data(
             data_metric,
             profile_filter,
             log_scale_x,
+            formula,
         );
     }
 
@@ -84,5 +90,6 @@ pub fn generate_plot_data(
         normalize,
         filter_outliers,
         show_percentile_bands,
+        formula,
     )
 }

@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Legend, Line, LineStyle, Plot};
 
 pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
-    let solver_data = match app.solver_data.as_ref() {
+    let solver_data = match app.solver.data.as_ref() {
         Some(data) if !data.is_empty() => data,
         Some(_) => {
             ui.label("Empty solver data.");
@@ -24,21 +24,21 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
 
     ui.horizontal(|ui| {
         ui.label("Benchmark:");
-        let current_idx = app.solver_selected_idx;
+        let current_idx = app.solver.selected_idx;
         if current_idx >= solver_data.len() {
-            app.solver_selected_idx = 0;
+            app.solver.selected_idx = 0;
         }
 
         egui::ComboBox::from_id_salt("dataset_selector")
             .selected_text(format!(
                 "{} - {}",
-                solver_data[app.solver_selected_idx].stencil,
-                solver_data[app.solver_selected_idx].size
+                solver_data[app.solver.selected_idx].stencil,
+                solver_data[app.solver.selected_idx].size
             ))
             .show_ui(ui, |ui| {
                 for (i, benchmark) in solver_data.iter().enumerate() {
                     ui.selectable_value(
-                        &mut app.solver_selected_idx,
+                        &mut app.solver.selected_idx,
                         i,
                         format!("{} - {}", benchmark.stencil, benchmark.size),
                     );
@@ -46,11 +46,11 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
             });
     });
 
-    let benchmark = &solver_data[app.solver_selected_idx];
+    let benchmark = &solver_data[app.solver.selected_idx];
 
     ui.separator();
 
-    if app.solver_selected_methods.is_empty() {
+    if app.solver.selected_methods.is_empty() {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
             ui.heading("📊 Solver Convergence Analysis");
@@ -72,7 +72,7 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
 
     // --- Convergence Plot (Balanced Height) ---
     let plot_height = ui.available_height() * 0.55;
-    let x_axis_label = match app.solver_x_axis {
+    let x_axis_label = match app.solver.x_axis {
         SolverXAxis::Iteration => "Iteration",
         SolverXAxis::Time => "Time (s)",
     };
@@ -80,7 +80,7 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
     Plot::new("convergence_plot")
         .height(plot_height)
         .x_axis_label(x_axis_label)
-        .y_axis_label(if app.solver_log_scale {
+        .y_axis_label(if app.solver.log_scale {
             "Value (Log10)"
         } else {
             "Value"
@@ -88,7 +88,7 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
         .legend(Legend::default())
         .show(ui, |plot_ui| {
             let mut solver_idx = 0;
-            let mut sorted_methods: Vec<_> = app.solver_selected_methods.iter().collect();
+            let mut sorted_methods: Vec<_> = app.solver.selected_methods.iter().collect();
             sorted_methods.sort();
 
             for solver_method in sorted_methods {
@@ -97,13 +97,13 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
                         get_solver_colors(solver_idx);
                     solver_idx += 1;
 
-                    if app.solver_show_recurrent {
+                    if app.solver.show_recurrent {
                         if let Some(residuals) = &result.recurrent_residuals {
                             let points = get_plot_points(
                                 residuals,
-                                result.iteration_timestamps.as_ref(), // Pass ref
-                                app.solver_x_axis,
-                                app.solver_log_scale,
+                                result.iteration_timestamps.as_ref(),
+                                app.solver.x_axis,
+                                app.solver.log_scale,
                             );
                             plot_ui.line(
                                 Line::new(format!("{} (R)", solver_method), points)
@@ -112,13 +112,13 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
                         }
                     }
 
-                    if app.solver_show_true {
+                    if app.solver.show_true {
                         if let Some(residuals) = &result.true_residuals {
                             let points = get_plot_points(
                                 residuals,
-                                result.iteration_timestamps.as_ref(), // Pass ref
-                                app.solver_x_axis,
-                                app.solver_log_scale,
+                                result.iteration_timestamps.as_ref(),
+                                app.solver.x_axis,
+                                app.solver.log_scale,
                             );
                             plot_ui.line(
                                 Line::new(format!("{} (T)", solver_method), points)
@@ -128,13 +128,13 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
                         }
                     }
 
-                    if app.solver_show_implicit {
+                    if app.solver.show_implicit {
                         if let Some(residuals) = &result.implicit_residuals {
                             let points = get_plot_points(
                                 residuals,
-                                result.iteration_timestamps.as_ref(), // Pass ref
-                                app.solver_x_axis,
-                                app.solver_log_scale,
+                                result.iteration_timestamps.as_ref(),
+                                app.solver.x_axis,
+                                app.solver.log_scale,
                             );
                             plot_ui.line(
                                 Line::new(format!("{} (I)", solver_method), points)
@@ -145,13 +145,13 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
                     }
 
                     // Cumulative Time - PURPLE
-                    if app.solver_show_timestamp {
+                    if app.solver.show_timestamp {
                         if let Some(times) = &result.iteration_timestamps {
                             let points = get_plot_points(
                                 times,
-                                result.iteration_timestamps.as_ref(), // Pass ref
-                                app.solver_x_axis,
-                                app.solver_log_scale,
+                                result.iteration_timestamps.as_ref(),
+                                app.solver.x_axis,
+                                app.solver.log_scale,
                             );
                             plot_ui.line(
                                 Line::new(format!("{} (Time)", solver_method), points)
@@ -172,17 +172,18 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
 
     // Tabs for each selected solver
     ui.horizontal(|ui| {
-        let sorted_methods: Vec<_> = app.solver_selected_methods.iter().collect();
+        let sorted_methods: Vec<_> = app.solver.selected_methods.iter().collect();
 
         for method in &sorted_methods {
             let is_active = app
-                .solver_selected_detail_method
+                .solver
+                .selected_detail_method
                 .as_ref()
                 .map(|active| active == *method)
                 .unwrap_or(false);
 
             if ui.selectable_label(is_active, *method).clicked() {
-                app.solver_selected_detail_method = Some((*method).clone());
+                app.solver.selected_detail_method = Some((*method).clone());
             }
         }
     });
@@ -191,21 +192,22 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
 
     // Show details for active tab
     let active_method = app
-        .solver_selected_detail_method
+        .solver
+        .selected_detail_method
         .clone()
         .and_then(|method| {
-            if app.solver_selected_methods.contains(&method) {
+            if app.solver.selected_methods.contains(&method) {
                 Some(method)
             } else {
                 None
             }
         })
-        .or_else(|| app.solver_selected_methods.iter().next().cloned());
+        .or_else(|| app.solver.selected_methods.iter().next().cloned());
 
     if let Some(solver_method) = active_method {
         // Auto-select first solver if none selected
-        if app.solver_selected_detail_method.is_none() {
-            app.solver_selected_detail_method = Some(solver_method.clone());
+        if app.solver.selected_detail_method.is_none() {
+            app.solver.selected_detail_method = Some(solver_method.clone());
         }
 
         if let Some(result) = benchmark.solver.get(solver_method.as_str()) {
@@ -213,7 +215,7 @@ pub fn render_solver_view(app: &mut Dashboard, ui: &mut Ui) {
                 &solver_method,
                 result,
                 &benchmark.solver,
-                &app.solver_selected_methods,
+                &app.solver.selected_methods,
             );
 
             // Use columns for compact horizontal layout

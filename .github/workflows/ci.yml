@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test --all-targets
+      - name: build
+        run: cargo build --release
+
+  # Keeps the wasm build from bit-rotting on main. Runs in parallel with
+  # `check` so PR latency is unchanged. We only run `cargo check` (not a
+  # full `trunk build`) here because installing trunk + wasm-bindgen-cli
+  # would dominate the wall time; the full pipeline belongs to the future
+  # deploy workflow (W4).
+  wasm-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm check
+        run: cargo check --target wasm32-unknown-unknown
