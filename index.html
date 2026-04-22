@@ -21,13 +21,14 @@
     }
   </style>
   <!--
-    `data-trunk rel="rust"` asks trunk to build the default cargo target. With
-    `crate-type = ["cdylib", "rlib"]` on the library, trunk picks the cdylib
-    (which is what we want: the wasm entry is `#[wasm_bindgen(start)]` in
-    `src/wasm.rs`, reachable only through the library). `data-wasm-opt="z"`
-    runs wasm-opt in size mode for release builds; it's a no-op in debug.
+    `data-target-name` disambiguates between the library (`ginkgo_dashboard_lib`,
+    cdylib+rlib) and the native binary (`ginkgo_dashboard`), which trunk would
+    otherwise reject with "found more than one target artifact". The wasm entry
+    is `#[wasm_bindgen(start)]` in `src/wasm.rs`, reachable only through the
+    library. `data-wasm-opt="z"` runs wasm-opt in size mode for release builds;
+    it's a no-op in debug.
   -->
-  <link data-trunk rel="rust" data-wasm-opt="z" />
+  <link data-trunk rel="rust" data-target-name="ginkgo_dashboard_lib" data-wasm-opt="z" />
 </head>
 <body>
   <canvas id="the_canvas_id"></canvas>
