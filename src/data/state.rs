@@ -7,9 +7,14 @@ use super::git_http;
 use super::models::BenchmarkProblem;
 use super::models::{BenchmarkDataset, SolverBenchmark};
 use super::AppError;
-use crate::types::{DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType};
+use crate::types::{
+    AggregationKind, DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType,
+};
 use crate::visualization::formula::CompiledFormula;
+use crate::visualization::outliers::{CommitOutlierReport, OutlierDetectionConfig};
 use crate::visualization::plotting::PlotData;
+use crate::visualization::stacked_bar::StackedBarData;
+use crate::visualization::timeseries::TimeseriesData;
 #[cfg(not(target_arch = "wasm32"))]
 use egui_file_dialog::FileDialog;
 use std::collections::{HashMap, HashSet};
@@ -227,6 +232,144 @@ pub struct PlotCache {
     pub key: u64,
 }
 
+/// Which side is the "before" reference in an A-vs-B comparison.
+///
+/// Speedup ratios and normalization baselines are computed relative to this
+/// side; swapping it flips every ratio in the diff table and histogram.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum CompareSide {
+    #[default]
+    A,
+    B,
+}
+
+/// User-facing controls for the Comparison plot type.
+///
+/// `commit_a`/`commit_b` are keys into [`DataSelection::dataset`]; a pair
+/// must be pre-loaded via the existing Git panel / file loader before the
+/// comparison UI is enabled. All other fields tune how ratios are computed
+/// and filtered.
+#[derive(Clone)]
+pub struct ComparisonState {
+    pub commit_a: Option<String>,
+    pub commit_b: Option<String>,
+    pub baseline_side: CompareSide,
+    pub shared_y_range: bool,
+    pub lower_is_better: bool,
+    /// Percent threshold for diff-table row suppression. Rows with
+    /// `|delta| / |value_a|` below this value are hidden from the table
+    /// (but still contribute to histogram / summary counts).
+    pub diff_threshold: f64,
+}
+
+impl Default for ComparisonState {
+    fn default() -> Self {
+        Self {
+            commit_a: None,
+            commit_b: None,
+            baseline_side: CompareSide::A,
+            shared_y_range: true,
+            lower_is_better: true,
+            diff_threshold: 0.0,
+        }
+    }
+}
+
+/// Memoization slot for the comparison-view computation.
+///
+/// Kept separate from [`PlotCache`] so switching the plot-type ComboBox
+/// back and forth between Scatter and Comparison doesn't repeatedly
+/// invalidate the single-plot cache.
+#[derive(Default)]
+pub struct ComparisonCache {
+    pub data: Option<Rc<crate::visualization::compare::ComparisonPlotData>>,
+    pub key: u64,
+}
+
+/// User-facing controls for the line-timeseries plot type (Task 6).
+///
+/// `problem_filter == Some(name)` degenerates the aggregate to a single
+/// problem's value per dataset — useful for "how did problem X evolve
+/// across every commit?" queries.
+#[derive(Clone)]
+pub struct TimeseriesState {
+    pub aggregation: AggregationKind,
+    pub format: DataFormat,
+    pub problem_filter: Option<String>,
+}
+
+impl Default for TimeseriesState {
+    fn default() -> Self {
+        Self {
+            aggregation: AggregationKind::Median,
+            format: DataFormat::CSR,
+            problem_filter: None,
+        }
+    }
+}
+
+/// User-facing controls for the stacked-bar plot type (Task 6).
+///
+/// `dataset == None` is a pre-selection gate: the UI shows a hint until
+/// the user picks one of the loaded datasets. `top_n` is clamped by the
+/// sidebar `DragValue` to `5..=500`.
+#[derive(Clone)]
+pub struct StackedBarState {
+    pub dataset: Option<String>,
+    pub sort_by_total: bool,
+    pub top_n: usize,
+}
+
+impl Default for StackedBarState {
+    fn default() -> Self {
+        Self {
+            dataset: None,
+            sort_by_total: true,
+            top_n: 30,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TimeseriesCache {
+    pub data: Option<Rc<TimeseriesData>>,
+    pub key: u64,
+}
+
+#[derive(Default)]
+pub struct StackedBarCache {
+    pub data: Option<Rc<StackedBarData>>,
+    pub key: u64,
+}
+
+/// Memoization slot for the cross-commit outlier detector (Task 8).
+///
+/// Keyed on every input that can change the report vec so the sidebar /
+/// timeseries view don't recompute per-frame — outlier math iterates every
+/// (commit, problem, format) and would be wasteful on the hot path.
+#[derive(Default)]
+pub struct OutlierCache {
+    pub reports: Option<Rc<Vec<CommitOutlierReport>>>,
+    pub key: u64,
+}
+
+/// Sidebar status slot for the vector-export buttons (Task 10).
+///
+/// Holds the most recent success message (the absolute path on native, or
+/// a size summary on wasm) or error string. Cleared whenever the user
+/// clicks the matching export button again so stale output doesn't linger.
+#[derive(Default)]
+pub struct ExportState {
+    pub last_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ExportKind {
+    Svg,
+    #[cfg(not(target_arch = "wasm32"))]
+    Pdf,
+}
+
 pub struct Dashboard {
     pub view_mode: ViewMode,
     pub plot_config: PlotConfig,
@@ -234,7 +377,16 @@ pub struct Dashboard {
     pub loading: LoadingState,
     pub solver: SolverState,
     pub plot_cache: PlotCache,
+    pub comparison: ComparisonState,
+    pub comparison_cache: ComparisonCache,
+    pub timeseries: TimeseriesState,
+    pub timeseries_cache: TimeseriesCache,
+    pub stacked_bar: StackedBarState,
+    pub stacked_bar_cache: StackedBarCache,
     pub git: GitState,
+    pub outlier_config: OutlierDetectionConfig,
+    pub outlier_cache: OutlierCache,
+    pub export: ExportState,
 }
 
 pub enum LoadResult {
@@ -258,7 +410,16 @@ impl Dashboard {
             loading: LoadingState::default(),
             solver: SolverState::default(),
             plot_cache: PlotCache::default(),
+            comparison: ComparisonState::default(),
+            comparison_cache: ComparisonCache::default(),
+            timeseries: TimeseriesState::default(),
+            timeseries_cache: TimeseriesCache::default(),
+            stacked_bar: StackedBarState::default(),
+            stacked_bar_cache: StackedBarCache::default(),
             git: GitState::default(),
+            outlier_config: OutlierDetectionConfig::default(),
+            outlier_cache: OutlierCache::default(),
+            export: ExportState::default(),
         }
     }
 
@@ -402,6 +563,8 @@ impl Dashboard {
         // Clear previous selection/commits so the UI reflects the new load.
         self.git.commits.clear();
         self.git.selected_commit_idx = None;
+        self.git.last_prefetch_idx = None;
+        self.git.prefetch_in_flight = false;
 
         let label = path
             .file_name()
@@ -468,6 +631,8 @@ impl Dashboard {
         self.git.last_error = None;
         self.git.commits.clear();
         self.git.selected_commit_idx = None;
+        self.git.last_prefetch_idx = None;
+        self.git.prefetch_in_flight = false;
 
         self.loading.current_label = Some("benchmarks".to_string());
 
@@ -532,11 +697,23 @@ impl Dashboard {
     fn apply_load_result(&mut self, file_name: String, data: LoadResult) {
         match data {
             LoadResult::Benchmark(dataset) => {
-                self.data_selection.active_dataset.push(file_name.clone());
+                // A prefetch load enters the dataset map but does NOT push
+                // onto `active_dataset` — the whole point of prefetch is to
+                // warm the cache without changing what the user is looking
+                // at. Only interactive / explicit loads toggle the active
+                // set; the commit-switcher's `select_commit` path handles
+                // activation when the user lands on a prefetched commit.
+                let was_prefetch = self.git.prefetch_in_flight;
+                if !was_prefetch && !self.data_selection.active_dataset.contains(&file_name) {
+                    self.data_selection.active_dataset.push(file_name.clone());
+                }
                 self.data_selection.dataset.insert(file_name, dataset);
                 self.data_selection.sorted_dataset_keys =
                     self.data_selection.dataset.keys().cloned().collect();
                 self.data_selection.sorted_dataset_keys.sort();
+                if was_prefetch {
+                    self.git.prefetch_in_flight = false;
+                }
             }
             LoadResult::Solver(solver_bench) => {
                 self.solver.data = Some(solver_bench);
@@ -544,11 +721,21 @@ impl Dashboard {
             LoadResult::Git(commits) => {
                 self.git.commits = commits;
                 self.git.selected_commit_idx = None;
+                self.git.last_prefetch_idx = None;
+                self.git.prefetch_in_flight = false;
             }
         }
     }
 
     fn apply_load_error(&mut self, e: AppError) {
+        // Prefetch failures shouldn't surface noise — they are opportunistic
+        // background loads, and a missing bench file is a perfectly
+        // legitimate state for a commit with no benchmark artifacts.
+        if self.git.prefetch_in_flight {
+            self.git.prefetch_in_flight = false;
+            log::debug!("commit prefetch failed silently: {}", e);
+            return;
+        }
         match e {
             // Git errors belong on the git panel only — surfacing them
             // in the Data Sources banner would duplicate.
@@ -559,6 +746,313 @@ impl Dashboard {
                 self.loading.last_error = Some(format!("Error loading file: {}", e));
             }
         }
+    }
+
+    /// Build the oldest-first commit-key ordering used by the outlier
+    /// detector and the LineTimeseries badge lookup (Task 8).
+    ///
+    /// When a git repo is loaded, this returns one `bench_<short_sha>` key
+    /// per commit in chronological order (the git walk itself is newest-
+    /// first, so we reverse). When no commits are loaded, falls back to
+    /// the alphabetical `sorted_dataset_keys` list so the detector still
+    /// produces a stable — if less meaningful — output.
+    pub fn outlier_ordered_keys(&self) -> Vec<String> {
+        if self.git.commits.is_empty() {
+            return self.data_selection.sorted_dataset_keys.clone();
+        }
+        // git.commits is newest-first; emit bench keys oldest-first so the
+        // rolling baseline window walks forward in time.
+        self.git
+            .commits
+            .iter()
+            .rev()
+            .map(Self::commit_dataset_key)
+            .filter(|k| self.data_selection.dataset.contains_key(k))
+            .collect()
+    }
+
+    /// Compute or fetch the cached outlier reports for the current commit
+    /// ordering + configuration (Task 8).
+    ///
+    /// Returns an empty vec when detection is disabled or no commits are
+    /// loaded. `ordered_keys` is the timeline-ordered dataset key list used
+    /// by the LineTimeseries view — oldest-first so the rolling baseline
+    /// window makes physical sense.
+    pub fn outlier_reports(
+        &mut self,
+        ordered_keys: &[String],
+    ) -> Rc<Vec<crate::visualization::outliers::CommitOutlierReport>> {
+        use crate::visualization::outliers::{
+            build_commit_stats, detect_outliers, outlier_cache_key,
+        };
+
+        if !self.outlier_config.enabled || ordered_keys.is_empty() {
+            return Rc::new(Vec::new());
+        }
+
+        let mut sorted_keys = self.data_selection.sorted_dataset_keys.clone();
+        sorted_keys.sort();
+
+        let custom_src = self
+            .plot_config
+            .custom_formula
+            .as_ref()
+            .map(|f| f.source.as_str());
+
+        let key = outlier_cache_key(&self.outlier_config, ordered_keys, &sorted_keys, custom_src);
+
+        if self.outlier_cache.key == key {
+            if let Some(rc) = self.outlier_cache.reports.as_ref() {
+                return Rc::clone(rc);
+            }
+        }
+
+        let stats = build_commit_stats(
+            &self.data_selection.dataset,
+            ordered_keys,
+            self.outlier_config.metric,
+            self.plot_config.custom_formula.as_ref(),
+        );
+        let reports = detect_outliers(&stats, &self.outlier_config);
+        let rc = Rc::new(reports);
+        self.outlier_cache.key = key;
+        self.outlier_cache.reports = Some(Rc::clone(&rc));
+        rc
+    }
+
+    /// Dataset key used when a commit's bench file is loaded via the
+    /// commit-switcher (Task 7).
+    ///
+    /// Deterministic and cross-target: both native and wasm derive the
+    /// same `"bench_<short_sha>"` string so the `DataSelection::dataset`
+    /// map key matches regardless of load path. This differs from
+    /// [`Dashboard::encode_file`], which embeds a wall-clock timestamp
+    /// and is used only for ad-hoc user file picks (where collisions
+    /// between re-imports of the same file are wanted-by-design).
+    pub fn commit_dataset_key(commit: &CommitInfo) -> String {
+        format!("bench_{}", commit.short_sha)
+    }
+
+    /// Step the commit selection by `delta` (positive = forward in the
+    /// commit list = later in history, since the walk is newest-first).
+    ///
+    /// Semantics:
+    /// - Empty commit list is a no-op.
+    /// - `None` + positive delta picks index 0; `None` + negative delta picks
+    ///   the last index.
+    /// - Out-of-range results saturate at 0 / `last_idx`.
+    ///
+    /// Does **not** kick off a load here; callers should invoke
+    /// [`Dashboard::on_commit_selected`] after stepping to propagate the
+    /// new selection to the active dataset and prefetch queue.
+    pub fn step_commit(&mut self, delta: i32) {
+        let len = self.git.commits.len();
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+        let new_idx = match self.git.selected_commit_idx {
+            None => {
+                if delta > 0 {
+                    0
+                } else {
+                    last
+                }
+            }
+            Some(cur) => {
+                let cur_i = cur as i64;
+                let raw = cur_i.saturating_add(delta as i64);
+                raw.clamp(0, last as i64) as usize
+            }
+        };
+        self.git.selected_commit_idx = Some(new_idx);
+    }
+
+    /// Handler for "the user just picked commit `idx`".
+    ///
+    /// If the associated dataset is already loaded, mutate
+    /// [`DataSelection::active_dataset`] so the render path switches to it.
+    /// If not, kick off a single-file load (native: worker thread; wasm:
+    /// `ehttp::fetch`). Also updates [`ComparisonState::commit_b`] so the
+    /// Comparison view follows the scrubber for the "right-hand side".
+    ///
+    /// Returns without action if `idx` is out of range.
+    pub fn on_commit_selected(&mut self, ctx: &egui::Context, idx: usize) {
+        if idx >= self.git.commits.len() {
+            return;
+        }
+        self.git.selected_commit_idx = Some(idx);
+
+        let key = {
+            let commit = &self.git.commits[idx];
+            Self::commit_dataset_key(commit)
+        };
+
+        // Comparison view: follow the scrubber on side B; leave A alone so
+        // the user can anchor a reference and scrub the other side.
+        self.comparison.commit_b = Some(key.clone());
+
+        if self.data_selection.dataset.contains_key(&key) {
+            // Already loaded: swap active to exactly this key.
+            self.data_selection.active_dataset.clear();
+            self.data_selection.active_dataset.push(key);
+        } else {
+            // Not loaded: kick off a foreground load. `is_prefetch=false`
+            // means the `Done` handler will push the key onto active_dataset
+            // automatically via `apply_load_result`.
+            self.load_commit_bench(ctx, idx, false);
+        }
+    }
+
+    /// Kick off background loads for the datasets at `idx - 1` and `idx + 1`
+    /// if their bench files are not yet in [`DataSelection::dataset`].
+    ///
+    /// Guards:
+    /// - skips when there's already an in-flight load (the load channel is
+    ///   single-slot; a second fire would clobber it);
+    /// - skips when the selection hasn't moved since the last prefetch;
+    /// - runs at most one prefetch at a time (there are two neighbours but
+    ///   only one active channel).
+    pub fn prefetch_adjacent_commits(&mut self, ctx: &egui::Context) {
+        let Some(idx) = self.git.selected_commit_idx else {
+            return;
+        };
+        if self.loading.is_loading {
+            return;
+        }
+        if self.git.last_prefetch_idx == Some(idx) {
+            return;
+        }
+
+        // Candidates: older (idx + 1) first, then newer (idx - 1). The walk
+        // is newest-first, so stepping "right" in the UI tends to move older,
+        // which is the more common scrub direction when surveying history.
+        let mut candidates: Vec<usize> = Vec::new();
+        if idx + 1 < self.git.commits.len() {
+            candidates.push(idx + 1);
+        }
+        if idx > 0 {
+            candidates.push(idx - 1);
+        }
+
+        for cand in candidates {
+            let key = Self::commit_dataset_key(&self.git.commits[cand]);
+            if self.data_selection.dataset.contains_key(&key) {
+                continue;
+            }
+            if self.git.commits[cand].bench_file.is_none() {
+                continue;
+            }
+            self.load_commit_bench(ctx, cand, true);
+            // Only one prefetch at a time (single load channel).
+            break;
+        }
+
+        self.git.last_prefetch_idx = Some(idx);
+    }
+
+    /// Load the bench file for commit `idx` via the standard load channel.
+    ///
+    /// `is_prefetch` toggles which apply-path the terminal `Done` message
+    /// takes: a prefetch drops the dataset into the cache without pushing
+    /// onto `active_dataset`, while a foreground load activates it (and
+    /// surfaces any error on the Data Sources banner).
+    ///
+    /// Native: spawns a worker thread that reads the file and streams the
+    /// same `BenchmarkProblem` parser used for interactive file picks.
+    /// Wasm: issues an `ehttp::fetch` against the bench file's relative URL
+    /// (as stored in `CommitInfo::bench_file` by the HTTP commit loader).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_commit_bench(&mut self, ctx: &egui::Context, idx: usize, is_prefetch: bool) {
+        if self.loading.is_loading {
+            return;
+        }
+        let Some(commit) = self.git.commits.get(idx) else {
+            return;
+        };
+        let Some(bench_path) = commit.bench_file.clone() else {
+            if !is_prefetch {
+                self.loading.last_error = Some(format!(
+                    "No benchmark file registered for commit {} (short {}).",
+                    commit.sha, commit.short_sha
+                ));
+            }
+            return;
+        };
+        let key = Self::commit_dataset_key(commit);
+
+        let (tx, rx): LoadChannel = channel();
+
+        self.loading.is_loading = true;
+        self.loading.rx_load = Some(rx);
+        self.loading.last_error = None;
+        self.loading.progress = None;
+        self.loading.current_label = Some(key);
+        self.git.prefetch_in_flight = is_prefetch;
+
+        let ctx_worker = ctx.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<LoadResult, AppError> {
+                let file = std::fs::File::open(&bench_path)?;
+                let reader = std::io::BufReader::new(file);
+                let problems = stream_parse_vec::<BenchmarkProblem, _>(
+                    reader,
+                    "Parsing benchmark",
+                    &tx,
+                    &ctx_worker,
+                )?;
+                let processed = super::loader::process_benchmark_data(problems)?;
+                Ok(LoadResult::Benchmark(processed))
+            })();
+            match result {
+                Ok(data) => {
+                    let _ = tx.send(Ok(LoadUpdate::Done(data)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+            ctx_worker.request_repaint();
+        });
+    }
+
+    /// Web-build counterpart to `load_commit_bench`.
+    ///
+    /// Fetches the commit's bench file over HTTP using the path stored in
+    /// `CommitInfo::bench_file` (populated by the HTTP commit loader as a
+    /// relative URL like `benchmarks/bench_<sha>.json`). On success the
+    /// parsed dataset is delivered through the same load channel the UI
+    /// already polls in `check_loading_status`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_commit_bench(&mut self, ctx: &egui::Context, idx: usize, is_prefetch: bool) {
+        if self.loading.is_loading {
+            return;
+        }
+        let Some(commit) = self.git.commits.get(idx) else {
+            return;
+        };
+        let Some(bench_path) = commit.bench_file.clone() else {
+            if !is_prefetch {
+                self.loading.last_error = Some(format!(
+                    "No benchmark file registered for commit {} (short {}).",
+                    commit.sha, commit.short_sha
+                ));
+            }
+            return;
+        };
+        let key = Self::commit_dataset_key(commit);
+        let url = bench_path.to_string_lossy().into_owned();
+
+        let (tx, rx): LoadChannel = channel();
+
+        self.loading.is_loading = true;
+        self.loading.rx_load = Some(rx);
+        self.loading.last_error = None;
+        self.loading.progress = None;
+        self.loading.current_label = Some(key);
+        self.git.prefetch_in_flight = is_prefetch;
+
+        super::git_http::load_bench_http(ctx.clone(), tx, url);
     }
 }
 
@@ -757,6 +1251,7 @@ mod tests {
             commit_author: None,
             commit_date: None,
             commit_message: None,
+            anomaly_rate: 0.10,
         };
         let mut rng = rng_from_seed(config.seed);
         let problems = generate_benchmark_file(&config, &mut rng);
@@ -773,5 +1268,153 @@ mod tests {
             assert_eq!(orig.problem.nonzeros, rt.problem.nonzeros);
             assert_eq!(orig.spmv.len(), rt.spmv.len());
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Commit-switcher tests (Task 7).
+    //
+    // `step_commit` and `prefetch_adjacent_commits` are exercised in
+    // isolation: neither needs the full load plumbing, so we populate
+    // `git.commits` directly with cheap fixtures and assert on the fields
+    // that matter.
+    // ---------------------------------------------------------------------
+
+    use super::super::git::CommitInfo;
+
+    fn make_commits(n: usize) -> Vec<CommitInfo> {
+        (0..n)
+            .map(|i| {
+                let short = format!("{:07x}", i);
+                CommitInfo {
+                    sha: format!("{short}0000000000000000000000000000000000"),
+                    short_sha: short,
+                    author: "Test <t@example.com>".to_string(),
+                    date: "2026-01-01T00:00:00Z".to_string(),
+                    message: format!("commit {i}"),
+                    bench_file: None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn step_commit_clamps_at_zero() {
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(3);
+        dash.git.selected_commit_idx = Some(0);
+        dash.step_commit(-1);
+        assert_eq!(dash.git.selected_commit_idx, Some(0));
+        dash.step_commit(-5);
+        assert_eq!(dash.git.selected_commit_idx, Some(0));
+    }
+
+    #[test]
+    fn step_commit_clamps_at_end() {
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(3);
+        dash.git.selected_commit_idx = Some(2);
+        dash.step_commit(1);
+        assert_eq!(dash.git.selected_commit_idx, Some(2));
+        dash.step_commit(999);
+        assert_eq!(dash.git.selected_commit_idx, Some(2));
+    }
+
+    #[test]
+    fn step_commit_from_none_selects_zero_or_last() {
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(4);
+        dash.git.selected_commit_idx = None;
+        dash.step_commit(1);
+        assert_eq!(dash.git.selected_commit_idx, Some(0));
+
+        dash.git.selected_commit_idx = None;
+        dash.step_commit(-1);
+        assert_eq!(dash.git.selected_commit_idx, Some(3));
+    }
+
+    #[test]
+    fn step_commit_on_empty_is_noop() {
+        let mut dash = Dashboard::new();
+        assert!(dash.git.commits.is_empty());
+        dash.step_commit(1);
+        assert_eq!(dash.git.selected_commit_idx, None);
+        dash.step_commit(-1);
+        assert_eq!(dash.git.selected_commit_idx, None);
+    }
+
+    #[test]
+    fn prefetch_skips_when_loading() {
+        let ctx = egui::Context::default();
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(3);
+        // Register bench files so the prefetch path would otherwise fire.
+        for c in dash.git.commits.iter_mut() {
+            c.bench_file = Some(PathBuf::from(format!(
+                "benchmarks/bench_{}.json",
+                c.short_sha
+            )));
+        }
+        dash.git.selected_commit_idx = Some(1);
+        dash.loading.is_loading = true;
+
+        dash.prefetch_adjacent_commits(&ctx);
+        // is_loading guard must short-circuit before state mutation.
+        assert!(!dash.git.prefetch_in_flight);
+        assert_eq!(dash.git.last_prefetch_idx, None);
+    }
+
+    #[test]
+    fn prefetch_respects_last_idx() {
+        let ctx = egui::Context::default();
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(3);
+        // All commits already "loaded" → prefetch will find nothing to do
+        // but still stamp `last_prefetch_idx`.
+        for c in &dash.git.commits {
+            let key = Dashboard::commit_dataset_key(c);
+            dash.data_selection
+                .dataset
+                .insert(key, BenchmarkDataset { benchmark: vec![] });
+        }
+        dash.git.selected_commit_idx = Some(1);
+
+        dash.prefetch_adjacent_commits(&ctx);
+        assert_eq!(dash.git.last_prefetch_idx, Some(1));
+        assert!(!dash.git.prefetch_in_flight);
+
+        // Second call with the same idx: still a no-op; `last_prefetch_idx`
+        // stays at Some(1).
+        dash.prefetch_adjacent_commits(&ctx);
+        assert_eq!(dash.git.last_prefetch_idx, Some(1));
+    }
+
+    #[test]
+    fn commit_dataset_key_is_deterministic() {
+        let commits = make_commits(1);
+        assert_eq!(Dashboard::commit_dataset_key(&commits[0]), "bench_0000000");
+    }
+
+    /// `on_commit_selected` on an already-loaded commit key activates the
+    /// dataset without touching the loading channel.
+    #[test]
+    fn on_commit_selected_activates_preloaded_dataset() {
+        let ctx = egui::Context::default();
+        let mut dash = Dashboard::new();
+        dash.git.commits = make_commits(2);
+        let key0 = Dashboard::commit_dataset_key(&dash.git.commits[0]);
+        dash.data_selection
+            .dataset
+            .insert(key0.clone(), BenchmarkDataset { benchmark: vec![] });
+        // Pretend some other dataset was active before the switch.
+        dash.data_selection.active_dataset.push("stale".to_string());
+
+        dash.on_commit_selected(&ctx, 0);
+
+        assert_eq!(dash.git.selected_commit_idx, Some(0));
+        assert_eq!(dash.data_selection.active_dataset, vec![key0.clone()]);
+        // Comparison view's commit_b tracks the selection.
+        assert_eq!(dash.comparison.commit_b.as_deref(), Some(key0.as_str()));
+        // No load was kicked off.
+        assert!(!dash.loading.is_loading);
     }
 }

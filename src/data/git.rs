@@ -126,6 +126,14 @@ pub struct GitState {
     pub selected_commit_idx: Option<usize>,
     /// Last error message surfaced to the UI, if any.
     pub last_error: Option<String>,
+    /// Last selected-commit index at which `prefetch_adjacent_commits` fired.
+    /// Prevents repeated prefetch attempts on idle frames where the selection
+    /// has not changed.
+    pub last_prefetch_idx: Option<usize>,
+    /// Whether a prefetch (adjacent-commit background load) is already in
+    /// flight. Set to `true` when a prefetch is launched, cleared when the
+    /// resulting `LoadResult::Benchmark` is applied.
+    pub prefetch_in_flight: bool,
 }
 
 /// Manifest entry shape produced by the `datagen` tool.

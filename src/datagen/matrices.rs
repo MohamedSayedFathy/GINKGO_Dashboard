@@ -4,94 +4,44 @@ use rand_chacha::ChaCha20Rng;
 use rand_distr::{Distribution, LogNormal};
 use smol_str::SmolStr;
 
-/// Matrix class descriptor: label (matches real SuiteSparse kind strings), row CV, posdef prob.
+/// Matrix class descriptor — kept *only* for the cosmetic `kind` text that
+/// appears in dashboard tooltips. The numeric fields below are no longer
+/// consumed by the parameter sampler (the redesign draws every numeric
+/// quantity independently of the class), but the struct itself is preserved
+/// so that adding new SuiteSparse-style labels stays a one-line change.
 struct MatrixClass {
     kind: &'static str,
     group: &'static str,
-    /// Coefficient of variation for row nnz distribution
-    row_cv: f64,
-    /// Probability that the matrix is positive definite
-    posdef_prob: f64,
-    /// Probability that the matrix is symmetric (psym)
-    sym_prob: f64,
-    /// Whether this class maps to is_2d3d = true
-    is_2d3d: bool,
-    /// Typical skewness for distribution stats
-    skewness: f64,
-    /// Typical kurtosis
-    kurtosis: f64,
 }
 
 const MATRIX_CLASSES: &[MatrixClass] = &[
     MatrixClass {
         kind: "structural problem",
         group: "UF",
-        row_cv: 0.3,
-        posdef_prob: 0.5,
-        sym_prob: 0.8,
-        is_2d3d: false,
-        skewness: 0.2,
-        kurtosis: 3.0,
     },
     MatrixClass {
         kind: "computational fluid dynamics problem",
         group: "UF",
-        row_cv: 0.1,
-        posdef_prob: 0.3,
-        sym_prob: 0.4,
-        is_2d3d: false,
-        skewness: 0.5,
-        kurtosis: 4.0,
     },
     MatrixClass {
         kind: "directed graph",
         group: "UF",
-        row_cv: 1.2,
-        posdef_prob: 0.0,
-        sym_prob: 0.05,
-        is_2d3d: false,
-        skewness: 2.5,
-        kurtosis: 12.0,
     },
     MatrixClass {
         kind: "undirected graph",
         group: "UF",
-        row_cv: 0.8,
-        posdef_prob: 0.0,
-        sym_prob: 1.0,
-        is_2d3d: false,
-        skewness: 1.5,
-        kurtosis: 7.0,
     },
     MatrixClass {
         kind: "2D/3D problem",
         group: "UF",
-        row_cv: 0.05,
-        posdef_prob: 0.7,
-        sym_prob: 0.9,
-        is_2d3d: true,
-        skewness: 0.1,
-        kurtosis: 3.0,
     },
     MatrixClass {
         kind: "circuit simulation problem",
         group: "UF",
-        row_cv: 1.5,
-        posdef_prob: 0.1,
-        sym_prob: 0.2,
-        is_2d3d: false,
-        skewness: 3.0,
-        kurtosis: 18.0,
     },
     MatrixClass {
         kind: "optimization problem",
         group: "UF",
-        row_cv: 0.5,
-        posdef_prob: 0.2,
-        sym_prob: 0.6,
-        is_2d3d: false,
-        skewness: 0.8,
-        kurtosis: 5.0,
     },
 ];
 
@@ -100,6 +50,10 @@ const MATRIX_CLASSES: &[MatrixClass] = &[
 const CLASS_WEIGHTS: &[f64] = &[0.20, 0.40, 0.55, 0.70, 0.85, 0.95, 1.00];
 
 /// Sample a matrix class index according to `CLASS_WEIGHTS`.
+///
+/// The returned class only feeds the cosmetic `kind` field (and `is_2d3d`
+/// derived from a string match). All numeric matrix parameters are drawn
+/// independently of this selection in `generate_matrix`.
 fn sample_class(rng: &mut ChaCha20Rng) -> &'static MatrixClass {
     let r: f64 = rng.random();
     let idx = CLASS_WEIGHTS
@@ -107,6 +61,39 @@ fn sample_class(rng: &mut ChaCha20Rng) -> &'static MatrixClass {
         .position(|&w| r < w)
         .unwrap_or(MATRIX_CLASSES.len() - 1);
     &MATRIX_CLASSES[idx]
+}
+
+/// Sample from a mixture of log-normal components.
+///
+/// `components` is a slice of `(weight, mu, sigma)` tuples; weights are
+/// normalized by their sum. The draw consumes RNG in a fixed sequence —
+/// first one uniform sample to pick the component, then exactly one
+/// log-normal sample — so the function is byte-deterministic for a given
+/// `rng` state regardless of which component the picker selects.
+fn sample_mixture_lognormal(rng: &mut ChaCha20Rng, components: &[(f64, f64, f64)]) -> f64 {
+    debug_assert!(!components.is_empty());
+
+    // Step 1: draw the picker uniform first, unconditionally.
+    let pick: f64 = rng.random();
+
+    // Step 2: pick the component by cumulative weight.
+    let total: f64 = components.iter().map(|(w, _, _)| *w).sum();
+    let target = pick * total;
+    let mut acc = 0.0_f64;
+    let mut chosen = components.len() - 1;
+    for (i, (w, _, _)) in components.iter().enumerate() {
+        acc += *w;
+        if target < acc {
+            chosen = i;
+            break;
+        }
+    }
+    let (_, mu, sigma) = components[chosen];
+
+    // Step 3: draw the log-normal sample. Always exactly one RNG draw here,
+    // independent of which component was picked.
+    let dist = LogNormal::new(mu, sigma).expect("valid lognormal params");
+    dist.sample(rng)
 }
 
 /// Sample nnz log-uniformly from [lo, hi].
@@ -193,74 +180,102 @@ fn make_col_dist(mean: f64, cv: f64, skewness: f64, kurtosis: f64) -> MatrixColu
     }
 }
 
+/// CV mixture: 60% low-CV regime (median ~0.37) + 40% high-CV regime
+/// (median ~1.65). Used for both `row_cv` and `col_cv` (independent draws).
+const CV_MIXTURE: &[(f64, f64, f64)] = &[(0.6, -1.0, 0.7), (0.4, 0.5, 0.8)];
+
 /// Generate a single synthetic [`MatrixMetadata`].
+///
+/// The redesigned sampler draws every numeric quantity independently —
+/// `sample_class` is still consulted to pick a cosmetic `kind` label so
+/// dashboard tooltips don't all read identically, but the matrix class no
+/// longer drives row_cv, skewness, kurtosis, sym_prob, or posdef_prob. The
+/// per-call RNG sequence is fixed (class pick → nnz → avg_nnz → square pick
+/// → maybe shape ratio → row_cv → col_cv → skewness → kurtosis → posdef →
+/// binary → psym branch → maybe psym uniform → nsym → ell_perturbation) so
+/// reruns with the same seed are byte-identical.
 pub fn generate_matrix(rng: &mut ChaCha20Rng, id: u64) -> MatrixMetadata {
+    // Cosmetic class label only — does not feed any numeric parameter.
     let class = sample_class(rng);
 
-    // nnz drawn log-uniformly in [1e3, 1e7]
+    // nnz drawn log-uniformly in [1e3, 1e7] (unchanged).
     let nnz = log_uniform(rng, 1e3, 1e7).round() as u64;
 
-    // avg_nnz_per_row drawn log-uniformly in [2, 500]
-    let avg_nnz_per_row = log_uniform(rng, 2.0, 500.0);
+    // avg_nnz_per_row drawn log-uniformly in [1.5, 1000] — wider lower
+    // bound than the old [2, 500] window so the X-axis spans more orders
+    // of magnitude.
+    let avg_nnz_per_row = log_uniform(rng, 1.5_f64, 1000.0_f64);
 
-    // rows = nnz / avg_nnz_per_row, clamped to at least 1
+    // rows = nnz / avg_nnz_per_row, clamped to at least 1.
     let rows = ((nnz as f64 / avg_nnz_per_row).round() as u64).max(1);
 
-    // 90% square, 10% non-square
-    let cols = if rng.random::<f64>() < 0.90 {
+    // Shape: 35% square; otherwise draw a continuous LogNormal(0, 0.7)
+    // ratio in [0.05, 20.0]. Always draw the uniform picker first.
+    let square_pick: f64 = rng.random();
+    let cols = if square_pick < 0.35 {
         rows
     } else {
-        // Non-square: cols drawn log-uniformly in [rows/4, rows*4]
-        let lo = (rows as f64 / 4.0).max(1.0);
-        let hi = rows as f64 * 4.0;
-        log_uniform(rng, lo, hi).round() as u64
+        let shape_ln = LogNormal::new(0.0_f64, 0.7_f64).expect("valid lognormal params");
+        let ratio: f64 = shape_ln.sample(rng).clamp(0.05_f64, 20.0_f64);
+        ((rows as f64 * ratio).round() as u64).max(1)
     };
 
-    // Add small noise to row_cv so matrices of the same class differ slightly
-    let cv_noise: f64 = rng.random_range(-0.05_f64..0.05_f64);
-    let row_cv = (class.row_cv + cv_noise).max(0.01);
-
-    // col_cv is similar to row_cv (symmetric-ish matrix class)
-    let col_cv = row_cv * rng.random_range(0.8_f64..1.2_f64);
+    // CVs drawn independently from the mixture. No longer tied to a class
+    // baseline — the mixture itself produces a clean low/high regime split.
+    let row_cv = sample_mixture_lognormal(rng, CV_MIXTURE).clamp(0.01_f64, 5.0_f64);
+    let col_cv = sample_mixture_lognormal(rng, CV_MIXTURE).clamp(0.01_f64, 5.0_f64);
 
     let mean_nnz_per_row = nnz as f64 / rows as f64;
     let mean_nnz_per_col = nnz as f64 / cols as f64;
 
-    // Add small noise to higher-order stats
-    let sk_noise: f64 = rng.random_range(-0.1_f64..0.1_f64);
-    let skewness = class.skewness + sk_noise;
-    let kurtosis = class.kurtosis * rng.random_range(0.9_f64..1.1_f64);
+    // Higher-order moments: independent log-normals, no class anchor.
+    let sk_ln = LogNormal::new(-0.5_f64, 1.0_f64).expect("valid lognormal params");
+    let skewness = sk_ln.sample(rng).clamp(0.05_f64, 15.0_f64);
+    let ku_ln = LogNormal::new(1.0_f64, 0.7_f64).expect("valid lognormal params");
+    let kurtosis = ku_ln.sample(rng).clamp(1.5_f64, 50.0_f64);
 
     let row_dist = make_row_dist(mean_nnz_per_row, row_cv, skewness, kurtosis);
     let col_dist = make_col_dist(mean_nnz_per_col, col_cv, skewness, kurtosis);
 
-    let posdef = rng.random::<f64>() < class.posdef_prob;
-    let binary = rng.random::<f64>() < 0.3;
+    // Independent Bernoulli flags. is_2d3d is derived from the cosmetic
+    // class label — preserved so loaders that branch on `kind == "2D/3D
+    // problem"` keep working — but doesn't affect numeric draws.
+    let posdef = rng.random::<f64>() < 0.4_f64;
+    let binary = rng.random::<f64>() < 0.3_f64;
 
-    // psym: for undirected graphs = 1.0, others use class sym_prob
-    let psym = if class.sym_prob >= 1.0 {
-        1.0
+    // psym: 30% chance of fully symmetric (= 1.0), else Uniform(0, 1).
+    // Always draw the picker first; the second uniform is unconditionally
+    // drawn from a sub-range that depends on the picker — to keep the RNG
+    // sequence fixed regardless of the branch we draw a uniform *both*
+    // branches.
+    let psym_pick: f64 = rng.random();
+    let psym_uniform: f64 = rng.random();
+    let psym = if psym_pick < 0.3_f64 {
+        1.0_f64
     } else {
-        rng.random::<f64>() * class.sym_prob
+        psym_uniform
     };
-    let nsym = psym * rng.random_range(0.8_f64..1.0_f64);
+    let nsym = psym * rng.random_range(0.6_f64..1.0_f64);
 
-    let name = SmolStr::from(format!("{}_{}", class.group.to_lowercase(), id));
+    let is_2d3d = class.kind == "2D/3D problem";
+    let name = SmolStr::from(format!("synthetic_{}", id));
     let kind = SmolStr::from(class.kind);
-    let group = SmolStr::from(class.group);
+    let group = SmolStr::from("synthetic");
+    // Keep the class.group reference live so the field isn't dead code.
+    let _ = class.group;
 
     // Introduce small lognormal perturbation to max nnz/row for ELL storage calculation realism
-    // We perturb via LogNormal(0, 0.2) to get realistic max values
+    // We perturb via LogNormal(0, 0.2) to get realistic max values.
     let ln_perturbation = {
         let ln_distr = LogNormal::new(0.0_f64, 0.2_f64).expect("valid lognormal params");
         ln_distr.sample(rng)
     };
     // row_distribution.max is already set parametrically; apply perturbation for variability
-    // by clamping: max must be >= mean and >= q3
+    // by clamping: max must be >= mean and >= q3.
     let raw_max = row_dist.max * ln_perturbation;
     let row_max = raw_max.max(row_dist.q3).max(row_dist.mean);
 
-    // Rebuild row_dist with adjusted max
+    // Rebuild row_dist with adjusted max.
     let row_dist = MatrixRowsMetadata {
         max: row_max,
         ..row_dist
@@ -275,7 +290,7 @@ pub fn generate_matrix(rng: &mut ChaCha20Rng, id: u64) -> MatrixMetadata {
         nonzeros: nnz,
         real: true,
         binary,
-        is_2d3d: class.is_2d3d,
+        is_2d3d,
         posdef,
         psym,
         nsym,

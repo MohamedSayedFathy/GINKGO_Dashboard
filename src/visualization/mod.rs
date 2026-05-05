@@ -1,9 +1,13 @@
+pub mod compare;
 pub mod filter;
 pub mod formula;
 pub mod math;
+pub mod outliers;
 pub mod plotting;
 pub mod profile;
 pub mod scatter;
 pub mod solver;
+pub mod stacked_bar;
+pub mod timeseries;
 pub mod tooltip;
 pub mod utils;

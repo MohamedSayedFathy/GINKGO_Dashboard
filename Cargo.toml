@@ -62,11 +62,16 @@ rand_distr = { version = "0.5", optional = true }
 
 # ----------------------------------------------------------------------------
 # Native-only deps: gix pulls libgit2-style native code and OS file APIs;
-# egui-file-dialog uses `rfd`/native pickers. Neither has a web story today.
+# egui-file-dialog is a pure-egui file picker used for benchmark imports.
+# svg2pdf powers Task 10 PDF export. The `text` feature is required: without
+# it, usvg silently drops every text node when parsing the SVG, which means
+# the resulting PDF has axes and series but no tick labels, no title, no
+# legend. We skip `image` + `filters` since our SVGs are pure geometry.
 # ----------------------------------------------------------------------------
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 gix = { version = "0.66", default-features = false, features = ["max-performance-safe", "revision"] }
 egui-file-dialog = "0.11.0"
+svg2pdf = { version = "0.13.0", default-features = false, features = ["text"] }
 
 # ----------------------------------------------------------------------------
 # Wasm-only deps. Consumed by `src/wasm.rs` (the `#[wasm_bindgen(start)]`

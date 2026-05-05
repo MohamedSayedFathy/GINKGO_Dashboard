@@ -50,6 +50,9 @@ pub struct GenConfig {
     /// Commit subject/message line.
     /// Defaults to `""` when `None`.
     pub commit_message: Option<String>,
+    /// Probability (per matrix) of receiving a per-format anomaly hit during
+    /// SpMV generation. The plan calls for ~10% by default; tests override.
+    pub anomaly_rate: f64,
 }
 
 /// Generate a `Vec<BenchmarkProblem>` (the benchmark.json content) deterministically.
@@ -59,7 +62,12 @@ pub fn generate_benchmark_file(config: &GenConfig, rng: &mut ChaCha20Rng) -> Vec
     (0..config.matrices)
         .map(|i| {
             let matrix = matrices::generate_matrix(rng, i as u64 + 1);
-            benchmarks::generate_benchmark_problem(matrix, config.noise_stddev, rng)
+            benchmarks::generate_benchmark_problem(
+                matrix,
+                config.noise_stddev,
+                config.anomaly_rate,
+                rng,
+            )
         })
         .collect()
 }
@@ -72,7 +80,14 @@ pub fn run(config: &GenConfig) -> io::Result<usize> {
 
     let mut rng = rng_from_seed(config.seed);
 
-    let problems = generate_benchmark_file(config, &mut rng);
+    // Single-file and SHA modes share one matrix set; commit-series mode
+    // re-rolls matrices per commit, so it skips this expensive draw and
+    // uses a separate solver RNG further down.
+    let problems = if config.commits > 0 && config.commit_sha.is_none() {
+        Vec::new()
+    } else {
+        generate_benchmark_file(config, &mut rng)
+    };
 
     if let Some(sha) = &config.commit_sha {
         // Single-commit mode: write bench_<sha7>.json + upsert commits.json.
@@ -141,19 +156,17 @@ pub fn run(config: &GenConfig) -> io::Result<usize> {
 
         Ok(1)
     } else if config.commits > 0 {
-        // Commit-series mode: write N bench_<sha>.json files + commits.json
-        let manifest = commit_series::write_commit_series(
-            &problems,
-            config.commits,
-            config.seed,
-            &config.out_dir,
-        )?;
+        // Commit-series mode: matrices are re-rolled per commit inside
+        // `write_commit_series`. The main `rng` is unused here; solvers
+        // get their own seed-derived stream so re-running with the same
+        // `--seed` still yields byte-identical solver.json.
+        let manifest = commit_series::write_commit_series(config, &config.out_dir)?;
 
-        // Write solver.json (only in commit-series and single-file modes)
+        let mut solver_rng = rng_from_seed(config.seed.wrapping_add(7919));
         let solver_path = config.out_dir.join("solver.json");
         let solver_file = std::fs::File::create(&solver_path)?;
         let solver_writer = std::io::BufWriter::new(solver_file);
-        let solver_data = solvers::generate_solver_benchmarks(config.noise_stddev, &mut rng);
+        let solver_data = solvers::generate_solver_benchmarks(config.noise_stddev, &mut solver_rng);
         write_json_deterministic(solver_writer, &solver_data)?;
 
         Ok(manifest.len())
@@ -192,6 +205,7 @@ mod tests {
             commit_author: None,
             commit_date: None,
             commit_message: None,
+            anomaly_rate: 0.10,
         }
     }
 
@@ -267,19 +281,30 @@ mod tests {
         }
     }
 
-    /// Test 3: Physical sanity — ELL faster than COO for low row_cv; HYBRID faster than ELL for
-    /// high row_cv.
+    /// Test 3: Physical sanity (statistical) — ELL is *usually* faster than
+    /// COO for low row_cv, and ELL is *usually* slower than HYBRID for high
+    /// row_cv. With the wider per-format noise the redesign introduces,
+    /// per-matrix invariants no longer hold; we sample only the CV tails
+    /// and require ≥ 65% of each tail's matrices to follow the expected
+    /// ordering.
     ///
-    /// We use seed 42 and scan the generated set for matrices meeting each criterion.
+    /// Note: the redesign's CV mixture sampler (LogNormal(-1.0, 0.7) for
+    /// the 60% low-regime branch) places its median at ~0.37, so the very
+    /// strict `< 0.05` lower threshold the plan suggested would yield
+    /// effectively zero matrices in 200 draws. We use `< 0.20` for the
+    /// low-CV tail (still inside the regime where `format_time` orders
+    /// ELL strictly below COO) and `> 2.5` for the high-CV tail as planned.
     #[test]
     fn test_physical_sanity() {
-        // Use a large enough set to find matrices in both CV regimes.
-        let config = make_config(100, 0, 42);
+        // Larger sample so both CV tails are populated.
+        let config = make_config(200, 0, 42);
         let mut rng = rng_from_seed(config.seed);
         let problems = generate_benchmark_file(&config, &mut rng);
 
-        let mut found_low_cv = false;
-        let mut found_high_cv = false;
+        let mut low_cv_total = 0_usize;
+        let mut low_cv_pass = 0_usize;
+        let mut high_cv_total = 0_usize;
+        let mut high_cv_pass = 0_usize;
 
         for p in &problems {
             let row_cv = if p.problem.row_distribution.mean > 0.0 {
@@ -292,40 +317,52 @@ mod tests {
             let coo_time = p.spmv.get(DataFormat::COO.as_key()).and_then(|e| e.time);
             let hybrid_time = p.spmv.get(DataFormat::HYBRID.as_key()).and_then(|e| e.time);
 
-            if row_cv < 0.1 {
+            if row_cv < 0.20 {
                 if let (Some(ell), Some(coo)) = (ell_time, coo_time) {
-                    assert!(
-                        ell < coo,
-                        "For low row_cv ({:.3}), ELL ({:.6}s) should be faster than COO ({:.6}s)",
-                        row_cv,
-                        ell,
-                        coo
-                    );
-                    found_low_cv = true;
+                    low_cv_total += 1;
+                    if ell < coo {
+                        low_cv_pass += 1;
+                    }
                 }
             }
 
-            if row_cv > 1.5 {
+            if row_cv > 2.5 {
                 if let (Some(ell), Some(hybrid)) = (ell_time, hybrid_time) {
-                    assert!(
-                        ell > hybrid,
-                        "For high row_cv ({:.3}), ELL ({:.6}s) should be slower than HYBRID ({:.6}s)",
-                        row_cv,
-                        ell,
-                        hybrid
-                    );
-                    found_high_cv = true;
+                    high_cv_total += 1;
+                    if ell > hybrid {
+                        high_cv_pass += 1;
+                    }
                 }
             }
         }
 
         assert!(
-            found_low_cv,
-            "No matrix with row_cv < 0.1 found — increase matrix count or check class sampling"
+            low_cv_total >= 5,
+            "Need at least 5 matrices with row_cv < 0.20 for a meaningful test, got {}",
+            low_cv_total
         );
         assert!(
-            found_high_cv,
-            "No matrix with row_cv > 1.5 found — increase matrix count or check class sampling"
+            high_cv_total >= 5,
+            "Need at least 5 matrices with row_cv > 2.5 for a meaningful test, got {}",
+            high_cv_total
+        );
+
+        // Require at least 65% of each tail to follow the expected ordering.
+        let low_threshold = (low_cv_total * 65).div_ceil(100); // ceil(total * 0.65)
+        let high_threshold = (high_cv_total * 65).div_ceil(100);
+        assert!(
+            low_cv_pass >= low_threshold,
+            "Low-CV tail: only {}/{} matrices have ELL < COO (need >= {})",
+            low_cv_pass,
+            low_cv_total,
+            low_threshold
+        );
+        assert!(
+            high_cv_pass >= high_threshold,
+            "High-CV tail: only {}/{} matrices have ELL > HYBRID (need >= {})",
+            high_cv_pass,
+            high_cv_total,
+            high_threshold
         );
     }
 
@@ -377,7 +414,9 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("create temp dir");
 
         let config = GenConfig {
-            matrices: 20,
+            // 80 matrices per commit gives a stable median; 40 was on the
+            // edge of being noisy enough to swallow the ×1.6 ELL bump.
+            matrices: 80,
             commits: 5,
             seed: 42,
             noise_stddev: 0.08,
@@ -386,6 +425,7 @@ mod tests {
             commit_author: None,
             commit_date: None,
             commit_message: None,
+            anomaly_rate: 0.10,
         };
 
         let result = run(&config);
@@ -427,27 +467,66 @@ mod tests {
         let regr_times = load_ell_times(&manifest[regression_idx].file);
         let next_times = load_ell_times(&manifest[regression_idx + 1].file);
 
-        assert_eq!(
-            prev_times.len(),
-            regr_times.len(),
-            "All commits must have same matrix count"
-        );
-
-        // Count how many matrices have regression_ell > prev_ell and regression_ell > next_ell
-        let n = prev_times.len();
-        let mut regression_count = 0;
-        for i in 0..n {
-            if regr_times[i] > prev_times[i] && regr_times[i] > next_times[i] {
-                regression_count += 1;
+        // With per-commit matrix resampling, prev / regr / next have
+        // different matrices entirely (different rows, nnz, etc.), so
+        // per-matrix comparison is meaningless. Compare medians instead:
+        // the ×1.6 ELL bump should lift the regression commit's median
+        // visibly above its neighbours' medians, even with the new wider
+        // noise.
+        fn median(mut v: Vec<f64>) -> f64 {
+            assert!(!v.is_empty(), "median of empty list");
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = v.len();
+            if n.is_multiple_of(2) {
+                (v[n / 2 - 1] + v[n / 2]) / 2.0
+            } else {
+                v[n / 2]
             }
         }
 
+        let prev_med = median(prev_times);
+        let regr_med = median(regr_times);
+        let next_med = median(next_times);
+
+        // Each commit's matrix set differs in size/shape, so the absolute
+        // medians can drift considerably. We require the regression commit's
+        // median ELL time to be at least 10% above each neighbour's median.
+        // The deterministic ×1.6 bump is far above 10% on average; the
+        // 10% threshold gives headroom for the per-commit format walk
+        // (clamped to ±50%) and the matrix-resampling variance.
+        let prev_ratio = regr_med / prev_med;
+        let next_ratio = regr_med / next_med;
         assert!(
-            regression_count >= n / 2,
-            "Regression commit must have higher ELL times than neighbors for at least half the matrices. \
-             Got {}/{} matrices with regression.",
-            regression_count,
-            n
+            prev_ratio > 1.10,
+            "Regression commit's median ELL time should be >1.10x previous commit's median; \
+             got prev_med={prev_med:.3e}, regr_med={regr_med:.3e}, ratio={prev_ratio:.3}"
+        );
+        assert!(
+            next_ratio > 1.10,
+            "Regression commit's median ELL time should be >1.10x next commit's median; \
+             got regr_med={regr_med:.3e}, next_med={next_med:.3e}, ratio={next_ratio:.3}"
+        );
+
+        // Sanity: the matrices should genuinely be different per commit —
+        // confirm by checking that the prev and regr files have disjoint
+        // matrix names (commit-unique suffix).
+        let load_names = |file: &str| -> Vec<String> {
+            let path = tmp.join(file);
+            let json = std::fs::read_to_string(path).expect("read bench file");
+            let problems: Vec<BenchmarkProblem> =
+                serde_json::from_str(&json).expect("parse bench file");
+            problems
+                .iter()
+                .map(|p| p.problem.name.to_string())
+                .collect()
+        };
+        let prev_names = load_names(&manifest[regression_idx - 1].file);
+        let regr_names = load_names(&manifest[regression_idx].file);
+        let prev_set: std::collections::HashSet<_> = prev_names.iter().collect();
+        let overlap = regr_names.iter().filter(|n| prev_set.contains(n)).count();
+        assert_eq!(
+            overlap, 0,
+            "Per-commit matrix names must be disjoint (got {overlap} collisions)"
         );
 
         // Cleanup
@@ -469,6 +548,7 @@ mod tests {
             commit_author: Some("Test <t@example.com>".to_string()),
             commit_date: Some("2026-04-19T00:00:00Z".to_string()),
             commit_message: Some("test commit".to_string()),
+            anomaly_rate: 0.10,
         };
 
         let result = run(&config);
@@ -506,6 +586,7 @@ mod tests {
             commit_author: Some(author.to_string()),
             commit_date: Some("2026-04-19T00:00:00Z".to_string()),
             commit_message: Some("test".to_string()),
+            anomaly_rate: 0.10,
         };
 
         run(&make("First Author <first@example.com>")).expect("first run");
@@ -544,6 +625,7 @@ mod tests {
             commit_author: None,
             commit_date: None,
             commit_message: None,
+            anomaly_rate: 0.10,
         };
 
         run(&make("feed456abcdef1234567890abcdef1234567890ab")).expect("first sha");
@@ -599,6 +681,7 @@ mod tests {
             commit_author: Some("Det Test <det@example.com>".to_string()),
             commit_date: Some("2026-01-01T00:00:00Z".to_string()),
             commit_message: Some("determinism check".to_string()),
+            anomaly_rate: 0.10,
         };
 
         // Run A: sha1 then sha2.

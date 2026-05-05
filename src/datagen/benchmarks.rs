@@ -2,7 +2,7 @@ use crate::data::models::{BenchmarkEntry, BenchmarkOptimal, BenchmarkProblem, Ma
 use crate::types::DataFormat;
 use rand::Rng;
 use rand_chacha::ChaCha20Rng;
-use rand_distr::{Distribution, Normal};
+use rand_distr::{Distribution, LogNormal, Normal};
 use std::collections::HashMap;
 
 /// Peak GPU memory bandwidth (bytes/second) used in the roofline model.
@@ -149,6 +149,12 @@ fn format_time(
 /// Apply multiplicative log-normal noise to a time value.
 ///
 /// `noise_stddev` is the sigma of the log-normal: `t *= exp(N(0, sigma))`.
+///
+/// Retained for backward compatibility with external callers (the solver
+/// generator still uses the old additive-sigma model). The SpMV path now
+/// computes per-format noise inline so each format can key its own σ off
+/// `BASE_FORMAT_SIGMA × FORMAT_SIGMA_MULT[fmt]`.
+#[allow(dead_code)]
 fn apply_noise(time: f64, noise_stddev: f64, rng: &mut ChaCha20Rng) -> f64 {
     if noise_stddev <= 0.0 {
         return time;
@@ -158,12 +164,33 @@ fn apply_noise(time: f64, noise_stddev: f64, rng: &mut ChaCha20Rng) -> f64 {
     time * z.exp()
 }
 
+/// Base log-normal sigma for per-format SpMV noise. Multiplied by the
+/// per-format weights below and again by the user-tunable `noise_stddev`
+/// CLI flag.
+const BASE_FORMAT_SIGMA: f64 = 0.40;
+
+/// Per-format σ multiplier on top of `BASE_FORMAT_SIGMA`. COO and HYBRID
+/// see more variance from atomic conflicts and two-pass scheduling; CSR /
+/// ELL / SELLP are tighter.
+fn format_sigma_mult(fmt: DataFormat) -> f64 {
+    match fmt {
+        DataFormat::CSR | DataFormat::ELL | DataFormat::SELLP => 1.0,
+        DataFormat::COO => 1.7,
+        DataFormat::HYBRID => 1.5,
+    }
+}
+
 /// Generate all 5 format [`BenchmarkEntry`] entries for a matrix, plus the optimal.
 ///
 /// Returns `(spmv_map, optimal_format_key)`.
+///
+/// `anomaly_rate` controls the probability that a single random format on
+/// this matrix gets a heavy log-normal slowdown applied — feeds the outlier
+/// detection workflow.
 pub fn generate_spmv_entries(
     matrix: &MatrixMetadata,
     noise_stddev: f64,
+    anomaly_rate: f64,
     rng: &mut ChaCha20Rng,
 ) -> (HashMap<String, BenchmarkEntry>, BenchmarkOptimal) {
     let rows = matrix.rows;
@@ -196,29 +223,83 @@ pub fn generate_spmv_entries(
         (DataFormat::SELLP, sellp_bytes),
     ];
 
+    // Per-matrix bandwidth-efficiency factor. Real GPUs hit anywhere from
+    // ~30% to ~150% of peak depending on access patterns, cache reuse, and
+    // load imbalance. Wider sigma than before (0.50 vs 0.35) widens each
+    // format's ribbon into a band without breaking the format ordering
+    // that `format_time` establishes.
+    let efficiency = {
+        let lognormal = LogNormal::new(0.0_f64, 0.50_f64).expect("valid lognormal params");
+        lognormal.sample(rng)
+    };
+
+    // Per-matrix repetition count — real CI varies between short
+    // smoke-test sweeps and long calibration runs.
+    let repetitions = {
+        let log_lo = (3.0_f64).ln();
+        let log_hi = (100.0_f64).ln();
+        let t: f64 = rng.random();
+        (log_lo + t * (log_hi - log_lo)).exp().round().max(1.0) as u64
+    };
+
+    // Anomaly injection: a fraction of matrices get one random format
+    // slowed down by a heavy log-normal multiplier. We *always* draw both
+    // the picker uniform, the format-index uniform, and the anomaly factor
+    // unconditionally — the conditional only decides whether to *apply*
+    // the factor — so the RNG sequence stays fixed regardless of branch.
+    let anomaly_pick: f64 = rng.random();
+    let anomaly_fmt_idx: f64 = rng.random();
+    let anomaly_factor = {
+        let lognormal = LogNormal::new(0.7_f64, 0.8_f64).expect("valid lognormal params");
+        lognormal.sample(rng)
+    };
+    let anomaly_format = if anomaly_pick < anomaly_rate {
+        let idx = ((anomaly_fmt_idx * formats.len() as f64) as usize).min(formats.len() - 1);
+        Some(formats[idx].0)
+    } else {
+        None
+    };
+
     let mut spmv: HashMap<String, BenchmarkEntry> = HashMap::new();
     let mut best_time = f64::MAX;
     let mut best_key = DataFormat::CSR.as_key();
 
     for (fmt, storage) in &formats {
-        let base_time = format_time(*fmt, *storage, row_cv, rows, nnz, row_median_nnz);
-        let noisy_time = apply_noise(base_time, noise_stddev, rng);
+        let base_time = format_time(*fmt, *storage, row_cv, rows, nnz, row_median_nnz) * efficiency;
 
-        // ELL / HYBRID / SELLP have lower numerical error (padding with zeros → exact);
-        // CSR / COO have near-zero norm2 from exact scatter/gather.
+        // Per-format inline log-normal noise. `noise_stddev` is a scaling
+        // factor on the base sigma so users can still dial via CLI.
+        let sigma = BASE_FORMAT_SIGMA * format_sigma_mult(*fmt) * noise_stddev;
+        let noise = if sigma > 0.0 {
+            let normal = Normal::new(0.0_f64, sigma).expect("valid normal params");
+            let z: f64 = normal.sample(rng);
+            z.exp()
+        } else {
+            // Even when noise is disabled we draw nothing — sigma=0 means
+            // the user explicitly opted out. No RNG branching elsewhere
+            // depends on this path.
+            1.0_f64
+        };
+
+        let mut noisy_time = base_time * noise;
+        if Some(*fmt) == anomaly_format {
+            noisy_time *= anomaly_factor;
+        }
+
+        // Numerical-error model. Even formats that are "exact" in theory
+        // pick up rounding from accumulation order, so vary all five rather
+        // than pinning CSR/COO at a flat zero.
+        let norm2_mult: f64 = rng.random_range(0.2_f64..3.0_f64);
         let max_relative_norm2 = match fmt {
-            DataFormat::CSR | DataFormat::COO => 0.0,
-            DataFormat::ELL | DataFormat::HYBRID | DataFormat::SELLP => {
-                // Plausible epsilon-level rounding: ~5e-17
-                5e-17_f64 * rng.random_range(0.5_f64..2.0_f64)
-            }
+            DataFormat::CSR | DataFormat::COO => 1e-17_f64 * norm2_mult,
+            DataFormat::ELL | DataFormat::HYBRID | DataFormat::SELLP => 5e-17_f64 * norm2_mult,
         };
 
         let entry = BenchmarkEntry {
             storage: Some(*storage),
             max_relative_norm2: Some(max_relative_norm2),
             time: Some(noisy_time),
-            repetitions: Some(10),
+            repetitions: Some(repetitions),
             completed: true,
             // Computed post-load; left at default so they aren't serialized.
             gflops_per_second: 0.0,
@@ -246,10 +327,11 @@ pub fn generate_spmv_entries(
 pub fn generate_benchmark_problem(
     matrix: MatrixMetadata,
     noise_stddev: f64,
+    anomaly_rate: f64,
     rng: &mut ChaCha20Rng,
 ) -> BenchmarkProblem {
     let filename = format!("/ssget/MM/{}/{}.mtx", matrix.group, matrix.name);
-    let (spmv, optimal) = generate_spmv_entries(&matrix, noise_stddev, rng);
+    let (spmv, optimal) = generate_spmv_entries(&matrix, noise_stddev, anomaly_rate, rng);
 
     BenchmarkProblem {
         filename,

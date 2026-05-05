@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 use super::git::{manifest_to_commits, GitError, ManifestEntry};
+use super::loader::process_benchmark_data;
+use super::models::BenchmarkProblem;
 use super::state::{LoadProgress, LoadResult, LoadUpdate};
 use super::AppError;
 
@@ -85,6 +87,64 @@ pub fn load_commits_http(ctx: egui::Context, tx: Sender<LoadUpdateMessage>) {
             })),
             Err(msg) => Err(AppError::Git(GitError::Fetch {
                 url: COMMITS_URL.to_string(),
+                status: None,
+                message: msg,
+            })),
+        };
+
+        let _ = tx.send(terminal);
+        ctx.request_repaint();
+    });
+}
+
+/// Fetch a single `bench_<sha>.json` bench file and deliver the parsed,
+/// post-processed [`BenchmarkDataset`] through `tx` (Task 7, web build).
+///
+/// `url` is a same-origin URL; on the deployed site it's a relative path
+/// like `benchmarks/bench_abcdef0.json` (what
+/// [`crate::data::git::manifest_to_commits`] stores in
+/// `CommitInfo::bench_file`). On any failure — non-2xx, network, parse, or
+/// post-processing — a top-level `Err(AppError)` is sent instead of
+/// `LoadUpdate::Done`, matching the contract of the commit-manifest loader.
+pub fn load_bench_http(ctx: egui::Context, tx: Sender<Result<LoadUpdate, AppError>>, url: String) {
+    // Initial progress ping so the UI shows a spinner while the fetch is
+    // outstanding; total=None because the HTTP layer doesn't surface
+    // Content-Length ahead of time.
+    let _ = tx.send(Ok(LoadUpdate::Progress(LoadProgress {
+        current: 0,
+        total: None,
+        phase: "Fetching bench file",
+    })));
+    ctx.request_repaint();
+
+    let request = ehttp::Request::get(&url);
+    let url_for_err = url.clone();
+
+    ehttp::fetch(request, move |response: ehttp::Result<ehttp::Response>| {
+        let terminal: Result<LoadUpdate, AppError> = match response {
+            Ok(resp) if resp.ok => {
+                match serde_json::from_slice::<Vec<BenchmarkProblem>>(&resp.bytes) {
+                    Ok(problems) => match process_benchmark_data(problems) {
+                        Ok(dataset) => Ok(LoadUpdate::Done(LoadResult::Benchmark(dataset))),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(AppError::Git(GitError::ManifestParse {
+                        path: PathBuf::from(url_for_err.clone()),
+                        source: e,
+                    })),
+                }
+            }
+            Ok(resp) => Err(AppError::Git(GitError::Fetch {
+                url: url_for_err.clone(),
+                status: Some(resp.status),
+                message: if resp.status_text.is_empty() {
+                    format!("HTTP {}", resp.status)
+                } else {
+                    resp.status_text.clone()
+                },
+            })),
+            Err(msg) => Err(AppError::Git(GitError::Fetch {
+                url: url_for_err.clone(),
                 status: None,
                 message: msg,
             })),

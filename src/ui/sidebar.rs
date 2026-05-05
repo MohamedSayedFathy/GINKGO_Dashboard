@@ -1,10 +1,18 @@
-use crate::data::state::{Dashboard, SolverXAxis, ViewMode};
-use crate::types::{DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType};
+use crate::data::state::{CompareSide, Dashboard, SolverXAxis, ViewMode};
+use crate::types::{
+    AggregationKind, DataFormat, DataMode, MetricType, PlotType, ProfileFilter, XaxisType,
+};
 use crate::visualization::formula;
 use eframe::egui::{
-    self, ComboBox, Context, DragValue, Grid, ProgressBar, RichText, SidePanel, Spinner, TextEdit,
-    Ui,
+    self, CollapsingHeader, ComboBox, Context, DragValue, Grid, ProgressBar, RichText, SidePanel,
+    Slider, Spinner, TextEdit, Ui,
 };
+
+/// Badge color for commits flagged as cross-commit outliers (Task 8).
+///
+/// Amber matches the "warning, not critical" connotation used elsewhere
+/// (e.g. Data Sources filter banner).
+const OUTLIER_BADGE_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 120, 40);
 
 pub fn render_axis_controls(app: &mut Dashboard, ui: &mut Ui) {
     ui.label("X-Axis:");
@@ -151,6 +159,8 @@ pub fn render_side_panel(app: &mut Dashboard, ctx: &Context) {
                 render_solver_panel(app, ui, ctx);
             } else {
                 render_benchmark_panel(app, ui);
+                ui.add_space(5.0);
+                render_export_controls(app, ui);
             }
 
             ui.add_space(10.0);
@@ -166,6 +176,49 @@ pub fn render_side_panel(app: &mut Dashboard, ctx: &Context) {
 
             if let Some(path) = app.loading.git_file_dialog.take_picked() {
                 app.load_git_repo(ctx, path.to_path_buf());
+            }
+        });
+}
+
+/// Render the Export collapsing section (Task 10).
+///
+/// Two buttons when running natively — SVG + PDF — and one on wasm
+/// (PDF conversion drags in `svg2pdf` / `usvg`, neither of which is
+/// currently built for wasm in this crate). The status label beneath
+/// shows the result of the most recent export: a path + byte count on
+/// success, an error message on failure, or nothing when idle.
+fn render_export_controls(app: &mut Dashboard, ui: &mut Ui) {
+    CollapsingHeader::new(RichText::new("Export").strong())
+        .id_salt("export_header")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Save SVG")
+                    .on_hover_text("Write the current plot as SVG to ./exports/")
+                    .clicked()
+                {
+                    app.export.last_message = None;
+                    app.export_current_svg();
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .button("Save PDF")
+                    .on_hover_text("Write the current plot as PDF to ./exports/")
+                    .clicked()
+                {
+                    app.export.last_message = None;
+                    app.export_current_pdf();
+                }
+            });
+            if let Some(msg) = app.export.last_message.as_ref() {
+                ui.add_space(4.0);
+                let color = if msg.contains("failed") {
+                    egui::Color32::from_rgb(220, 80, 80)
+                } else {
+                    egui::Color32::from_rgb(120, 200, 120)
+                };
+                ui.colored_label(color, msg);
             }
         });
 }
@@ -282,6 +335,8 @@ fn render_solver_panel(app: &mut Dashboard, ui: &mut Ui, _ctx: &Context) {
 fn render_benchmark_panel(app: &mut Dashboard, ui: &mut Ui) {
     render_git_panel(app, ui);
     ui.add_space(5.0);
+    render_outlier_controls(app, ui);
+    ui.add_space(5.0);
     ui.separator();
 
     ui.heading("Data Sources");
@@ -364,6 +419,370 @@ fn render_benchmark_panel(app: &mut Dashboard, ui: &mut Ui) {
     render_chart_options(app, ui);
 }
 
+/// Render the Comparison-plot sidebar controls: A/B pickers, baseline side,
+/// Y-link toggle, "lower is better" orientation flag, and the diff-table
+/// threshold knob. Disabled with a hint when fewer than two datasets are
+/// loaded — per Task 5, the user must pre-load both via the existing Git
+/// panel / file loader before they can compare.
+fn render_comparison_controls(app: &mut Dashboard, ui: &mut Ui) {
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Comparison").strong());
+        let keys = app.data_selection.sorted_dataset_keys.clone();
+        let enough = keys.len() >= 2;
+
+        if !enough {
+            ui.label(
+                egui::RichText::new("Load two datasets to compare.")
+                    .color(egui::Color32::from_rgb(180, 140, 40)),
+            );
+        }
+
+        Grid::new("comparison_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("A:");
+                ui.add_enabled_ui(enough, |ui| {
+                    let selected_a = app
+                        .comparison
+                        .commit_a
+                        .as_deref()
+                        .unwrap_or("(select)")
+                        .to_string();
+                    ComboBox::from_id_salt("compare_a_combo")
+                        .selected_text(selected_a)
+                        .show_ui(ui, |ui| {
+                            for k in &keys {
+                                let is_sel = app.comparison.commit_a.as_deref() == Some(k.as_str());
+                                if ui.selectable_label(is_sel, k).clicked() {
+                                    app.comparison.commit_a = Some(k.clone());
+                                }
+                            }
+                        });
+                });
+                ui.end_row();
+
+                ui.label("B:");
+                ui.add_enabled_ui(enough, |ui| {
+                    let selected_b = app
+                        .comparison
+                        .commit_b
+                        .as_deref()
+                        .unwrap_or("(select)")
+                        .to_string();
+                    ComboBox::from_id_salt("compare_b_combo")
+                        .selected_text(selected_b)
+                        .show_ui(ui, |ui| {
+                            for k in &keys {
+                                let is_sel = app.comparison.commit_b.as_deref() == Some(k.as_str());
+                                if ui.selectable_label(is_sel, k).clicked() {
+                                    app.comparison.commit_b = Some(k.clone());
+                                }
+                            }
+                        });
+                });
+                ui.end_row();
+
+                ui.label("Baseline:");
+                ui.add_enabled_ui(enough, |ui| {
+                    ComboBox::from_id_salt("compare_baseline_combo")
+                        .selected_text(match app.comparison.baseline_side {
+                            CompareSide::A => "A",
+                            CompareSide::B => "B",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut app.comparison.baseline_side,
+                                CompareSide::A,
+                                "A",
+                            );
+                            ui.selectable_value(
+                                &mut app.comparison.baseline_side,
+                                CompareSide::B,
+                                "B",
+                            );
+                        });
+                });
+                ui.end_row();
+
+                ui.label("Threshold (%):");
+                ui.add_enabled_ui(enough, |ui| {
+                    ui.add(
+                        DragValue::new(&mut app.comparison.diff_threshold)
+                            .speed(0.5)
+                            .range(0.0..=100.0),
+                    )
+                    .on_hover_text(
+                        "Hide diff-table rows whose |Δ|/|A| is below this percent. \
+                         Histogram and summary still include every finite ratio.",
+                    );
+                });
+                ui.end_row();
+            });
+
+        ui.add_enabled_ui(enough, |ui| {
+            ui.checkbox(&mut app.comparison.shared_y_range, "Shared Y range")
+                .on_hover_text("Align Y bounds across both panes.");
+            ui.checkbox(&mut app.comparison.lower_is_better, "Lower is better")
+                .on_hover_text(
+                    "Speedup orientation: when on (e.g. time), ratio = A/B so \
+                     ratio > 1 means B is faster. Turn off for gflops/bandwidth.",
+                );
+        });
+    });
+}
+
+/// Render the Line-Timeseries sidebar controls (Task 6). Exposes the
+/// aggregation kernel, single-format picker, and optional problem filter.
+fn render_timeseries_controls(app: &mut Dashboard, ui: &mut Ui) {
+    ui.group(|ui| {
+        ui.label(RichText::new("Line Timeseries").strong());
+
+        let keys = app.data_selection.sorted_dataset_keys.clone();
+        if keys.is_empty() {
+            ui.label(
+                RichText::new("Load datasets to see a timeseries.")
+                    .color(egui::Color32::from_rgb(180, 140, 40)),
+            );
+        }
+
+        Grid::new("timeseries_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Aggregation:");
+                ComboBox::from_id_salt("ts_agg_combo")
+                    .selected_text(format!("{:?}", app.timeseries.aggregation))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut app.timeseries.aggregation,
+                            AggregationKind::Median,
+                            "Median",
+                        );
+                        ui.selectable_value(
+                            &mut app.timeseries.aggregation,
+                            AggregationKind::Mean,
+                            "Mean",
+                        );
+                        ui.selectable_value(
+                            &mut app.timeseries.aggregation,
+                            AggregationKind::GeometricMean,
+                            "Geomean",
+                        );
+                    });
+                ui.end_row();
+
+                ui.label("Format:");
+                ComboBox::from_id_salt("ts_format_combo")
+                    .selected_text(format!("{:?}", app.timeseries.format))
+                    .show_ui(ui, |ui| {
+                        for f in [
+                            DataFormat::CSR,
+                            DataFormat::COO,
+                            DataFormat::ELL,
+                            DataFormat::HYBRID,
+                            DataFormat::SELLP,
+                        ] {
+                            ui.selectable_value(&mut app.timeseries.format, f, format!("{:?}", f));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Problem:");
+                // Collect all problem names from the active dataset set so
+                // the filter ComboBox reflects what's actually loadable.
+                let mut problem_names: Vec<String> = Vec::new();
+                for ds_key in &app.data_selection.active_dataset {
+                    if let Some(ds) = app.data_selection.dataset.get(ds_key) {
+                        for p in &ds.benchmark {
+                            let name = p.problem.name.as_str().to_string();
+                            if !problem_names.contains(&name) {
+                                problem_names.push(name);
+                            }
+                        }
+                    }
+                }
+                problem_names.sort();
+
+                let current = app
+                    .timeseries
+                    .problem_filter
+                    .clone()
+                    .unwrap_or_else(|| "(all)".to_string());
+                ComboBox::from_id_salt("ts_problem_combo")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(app.timeseries.problem_filter.is_none(), "(all)")
+                            .clicked()
+                        {
+                            app.timeseries.problem_filter = None;
+                        }
+                        for name in &problem_names {
+                            let is_sel =
+                                app.timeseries.problem_filter.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(is_sel, name).clicked() {
+                                app.timeseries.problem_filter = Some(name.clone());
+                            }
+                        }
+                    });
+                ui.end_row();
+            });
+    });
+}
+
+/// Render the Stacked-Bar sidebar controls (Task 6). A single-dataset
+/// picker, sort toggle, and top-N limiter.
+fn render_stacked_bar_controls(app: &mut Dashboard, ui: &mut Ui) {
+    ui.group(|ui| {
+        ui.label(RichText::new("Stacked Bar").strong());
+
+        let keys = app.data_selection.sorted_dataset_keys.clone();
+        if keys.is_empty() {
+            ui.label(
+                RichText::new("Load a dataset to view a breakdown.")
+                    .color(egui::Color32::from_rgb(180, 140, 40)),
+            );
+        }
+
+        Grid::new("stacked_bar_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Dataset:");
+                let selected = app
+                    .stacked_bar
+                    .dataset
+                    .as_deref()
+                    .unwrap_or("(select)")
+                    .to_string();
+                ComboBox::from_id_salt("sb_dataset_combo")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for k in &keys {
+                            let is_sel = app.stacked_bar.dataset.as_deref() == Some(k.as_str());
+                            if ui.selectable_label(is_sel, k).clicked() {
+                                app.stacked_bar.dataset = Some(k.clone());
+                            }
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Top N:");
+                ui.add(
+                    DragValue::new(&mut app.stacked_bar.top_n)
+                        .speed(1.0)
+                        .range(5..=500),
+                )
+                .on_hover_text("Cap bars shown; use sort-by-total to see heaviest first.");
+                ui.end_row();
+            });
+
+        ui.checkbox(&mut app.stacked_bar.sort_by_total, "Sort by total")
+            .on_hover_text("Rank problems by summed metric, largest first.");
+    });
+}
+
+/// Render the collapsing "Outlier detection" sidebar panel (Task 8).
+///
+/// Exposes the config knobs — baseline window, sigma threshold, percent
+/// deviation gate, and metric — and shows a small "N outliers / M commits"
+/// summary once detection is enabled. Controls other than the master
+/// checkbox are disabled until detection is enabled, so the dashboard
+/// never forces users who don't want this feature to pay the per-frame
+/// computation.
+fn render_outlier_controls(app: &mut Dashboard, ui: &mut Ui) {
+    CollapsingHeader::new(RichText::new("Outlier detection").strong())
+        .id_salt("outlier_detection_header")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.checkbox(&mut app.outlier_config.enabled, "Enable outlier detection")
+                .on_hover_text(
+                    "Flag commits whose benchmarks deviate more than K sigma \
+                 from the median of the last N commits.",
+                );
+
+            let enabled = app.outlier_config.enabled;
+
+            Grid::new("outlier_grid")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Baseline window (commits):");
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.add(
+                            DragValue::new(&mut app.outlier_config.baseline_window)
+                                .speed(1.0)
+                                .range(2..=50),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label("Sigma threshold (K):");
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.add(
+                            DragValue::new(&mut app.outlier_config.sigma_threshold)
+                                .speed(0.1)
+                                .range(1.0..=10.0),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label("Deviation percent (X):");
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.add(
+                            DragValue::new(&mut app.outlier_config.threshold_percent)
+                                .speed(1.0)
+                                .range(0.0..=100.0),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label("Metric:");
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ComboBox::from_id_salt("outlier_metric_combo")
+                            .selected_text(format!("{:?}", app.outlier_config.metric))
+                            .show_ui(ui, |ui| {
+                                for m in [
+                                    MetricType::Time,
+                                    MetricType::GflopsPerSecond,
+                                    MetricType::Storage,
+                                    MetricType::Repetitions,
+                                    MetricType::OperationalIntensity,
+                                    MetricType::EffectiveMemoryBandwidth,
+                                    MetricType::Custom,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut app.outlier_config.metric,
+                                        m,
+                                        format!("{:?}", m),
+                                    );
+                                }
+                            });
+                    });
+                    ui.end_row();
+                });
+
+            if enabled {
+                let ordered = app.outlier_ordered_keys();
+                let reports = app.outlier_reports(&ordered);
+                let total = reports.len();
+                let flagged = reports.iter().filter(|r| r.is_outlier).count();
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{flagged} outlier(s) detected out of {total} commits"
+                    ))
+                    .color(if flagged > 0 {
+                        OUTLIER_BADGE_COLOR
+                    } else {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    }),
+                );
+            }
+        });
+}
+
 /// Render the sidebar section for git-repo-driven benchmark navigation.
 ///
 /// Shows a "Load Git Repo" button, the currently loaded repo path (if any),
@@ -424,41 +843,243 @@ fn render_git_panel(app: &mut Dashboard, ui: &mut Ui) {
             ui.add_space(4.0);
             ui.label(RichText::new("History:").strong());
             render_commit_list(app, ui);
+            ui.add_space(6.0);
+            render_commit_switcher(app, ui);
+        }
+    });
+}
+
+/// Interactive commit switcher (Task 7).
+///
+/// Three controls that all read and write `git.selected_commit_idx`:
+/// - A horizontal [`Slider`] over `0..=last_idx` (no value readout; the
+///   ComboBox + step buttons give the textual form).
+/// - A [`ComboBox`] listing `"<short_sha> <subject>"` so keyboard users can
+///   jump directly without scrubbing.
+/// - Prev / Next step buttons with tooltips mentioning the `[` / `]`
+///   keybinds handled in `impl App for Dashboard`.
+///
+/// Any change propagates through `Dashboard::on_commit_selected`, which
+/// either activates an already-loaded dataset or kicks off a single-file
+/// load (per Task 7 spec).
+fn render_commit_switcher(app: &mut Dashboard, ui: &mut Ui) {
+    const MESSAGE_MAX: usize = 50;
+    let len = app.git.commits.len();
+    if len == 0 {
+        return;
+    }
+    let last = len - 1;
+    let is_loading = app.loading.is_loading;
+    let ctx = ui.ctx().clone();
+
+    let outlier_keys = compute_outlier_key_set(app);
+
+    ui.label(RichText::new("Switch Commit:").strong());
+
+    // Slider: index only. A tooltip on hover shows the currently-selected
+    // commit's short-SHA + subject + date. Per-position tooltip-at-pointer
+    // would require digging into the raw response + `hover_pos()` math; the
+    // current-selection tooltip is simpler and still useful.
+    let mut idx_val = app.git.selected_commit_idx.unwrap_or(0);
+    let slider_response = ui.add_enabled(
+        !is_loading,
+        Slider::new(&mut idx_val, 0..=last).show_value(false),
+    );
+    // Tooltip body: the currently-addressed commit.
+    if let Some(commit) = app.git.commits.get(idx_val) {
+        let date_short = commit.date.get(..10).unwrap_or(&commit.date);
+        let msg = truncate_str(&commit.message, MESSAGE_MAX);
+        slider_response
+            .clone()
+            .on_hover_text(format!("[{}] {} — {}", commit.short_sha, date_short, msg));
+    }
+    if slider_response.changed() && app.git.selected_commit_idx != Some(idx_val) {
+        app.on_commit_selected(&ctx, idx_val);
+    }
+
+    // ComboBox: full list, one line per commit.
+    let current_text = match app
+        .git
+        .selected_commit_idx
+        .and_then(|i| app.git.commits.get(i))
+    {
+        Some(c) => {
+            let key = Dashboard::commit_dataset_key(c);
+            let badge = if outlier_keys.contains(&key) {
+                "[!] "
+            } else {
+                ""
+            };
+            format!(
+                "{}{} {}",
+                badge,
+                c.short_sha,
+                truncate_str(&c.message, MESSAGE_MAX)
+            )
+        }
+        None => "(none)".to_string(),
+    };
+
+    // `commits` is borrowed immutably by the closure below, so we collect
+    // the per-row render tuples ahead of time.
+    let rows: Vec<(usize, String, String, bool)> = app
+        .git
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let key = Dashboard::commit_dataset_key(c);
+            let is_outlier = outlier_keys.contains(&key);
+            let badge = if is_outlier { "[!] " } else { "" };
+            (
+                i,
+                format!(
+                    "{}{} {}",
+                    badge,
+                    c.short_sha,
+                    truncate_str(&c.message, MESSAGE_MAX)
+                ),
+                format!(
+                    "{}\n{}\n{}",
+                    c.sha,
+                    c.author,
+                    truncate_str(&c.message, MESSAGE_MAX * 2)
+                ),
+                is_outlier,
+            )
+        })
+        .collect();
+
+    let mut pending: Option<usize> = None;
+    ui.add_enabled_ui(!is_loading, |ui| {
+        ComboBox::from_id_salt("commit_switcher_combo")
+            .selected_text(current_text)
+            .width(ui.available_width().min(260.0))
+            .show_ui(ui, |ui| {
+                for (i, label, tip, is_outlier) in &rows {
+                    let sel = app.git.selected_commit_idx == Some(*i);
+                    let text = if *is_outlier {
+                        RichText::new(label).color(OUTLIER_BADGE_COLOR)
+                    } else {
+                        RichText::new(label)
+                    };
+                    if ui.selectable_label(sel, text).on_hover_text(tip).clicked() {
+                        pending = Some(*i);
+                    }
+                }
+            });
+    });
+    if let Some(i) = pending {
+        app.on_commit_selected(&ctx, i);
+    }
+
+    // Prev / Next buttons: each steps by one in the commit list. Disabled
+    // at the corresponding end. Tooltips surface the `[` / `]` keybinds.
+    ui.horizontal(|ui| {
+        let cur = app.git.selected_commit_idx;
+        let can_back = !is_loading && cur.is_none_or(|i| i > 0);
+        let can_fwd = !is_loading && cur.is_none_or(|i| i < last);
+        let prev_resp = ui
+            .add_enabled(can_back, egui::Button::new("◀ Prev"))
+            .on_hover_text("Step to newer commit (keybind: [ )");
+        if prev_resp.clicked() {
+            app.step_commit(-1);
+            if let Some(idx) = app.git.selected_commit_idx {
+                app.on_commit_selected(&ctx, idx);
+            }
+        }
+        let next_resp = ui
+            .add_enabled(can_fwd, egui::Button::new("Next ▶"))
+            .on_hover_text("Step to older commit (keybind: ] )");
+        if next_resp.clicked() {
+            app.step_commit(1);
+            if let Some(idx) = app.git.selected_commit_idx {
+                app.on_commit_selected(&ctx, idx);
+            }
         }
     });
 }
 
 /// Render the scrollable commit list. Each row is a selectable label that
 /// updates `git.selected_commit_idx` on click.
+///
+/// When outlier detection is enabled (Task 8), commits flagged as outliers
+/// gain a `[!]` prefix and their label is rendered in the amber badge
+/// colour so keyboard users and visual scanners both see them.
 fn render_commit_list(app: &mut Dashboard, ui: &mut Ui) {
     const MESSAGE_MAX: usize = 50;
+    let ctx = ui.ctx().clone();
 
+    let outlier_keys = compute_outlier_key_set(app);
+
+    // Collect row descriptors up front; `on_commit_selected` needs `&mut app`
+    // so we can't hold the iterator borrow across the click branch.
+    let rows: Vec<(usize, String, String, bool)> = app
+        .git
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(idx, commit)| {
+            let marker = if commit.bench_file.is_some() {
+                "✓"
+            } else {
+                " "
+            };
+            let date_short = commit.date.get(..10).unwrap_or(&commit.date);
+            let message = truncate_str(&commit.message, MESSAGE_MAX);
+            let key = Dashboard::commit_dataset_key(commit);
+            let is_outlier = outlier_keys.contains(&key);
+            let badge = if is_outlier { "[!] " } else { "" };
+            let label = format!(
+                "{}{} [{}] {} — {}",
+                badge, marker, commit.short_sha, date_short, message
+            );
+            let tip = format!("{}\n{}\n{}", commit.sha, commit.author, commit.message);
+            (idx, label, tip, is_outlier)
+        })
+        .collect();
+
+    let mut pending: Option<usize> = None;
     egui::ScrollArea::vertical()
         .max_height(220.0)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for (idx, commit) in app.git.commits.iter().enumerate() {
-                let selected = app.git.selected_commit_idx == Some(idx);
-                let marker = if commit.bench_file.is_some() {
-                    "✓"
+            for (idx, label, tip, is_outlier) in &rows {
+                let selected = app.git.selected_commit_idx == Some(*idx);
+                let text = if *is_outlier {
+                    RichText::new(label).color(OUTLIER_BADGE_COLOR)
                 } else {
-                    " "
+                    RichText::new(label)
                 };
-                let date_short = commit.date.get(..10).unwrap_or(&commit.date);
-                let message = truncate_str(&commit.message, MESSAGE_MAX);
-                let label = format!(
-                    "{} [{}] {} — {}",
-                    marker, commit.short_sha, date_short, message
-                );
-                let resp = ui.selectable_label(selected, label).on_hover_text(format!(
-                    "{}\n{}\n{}",
-                    commit.sha, commit.author, commit.message
-                ));
-                if resp.clicked() {
-                    app.git.selected_commit_idx = Some(idx);
+                if ui
+                    .selectable_label(selected, text)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    pending = Some(*idx);
                 }
             }
         });
+    if let Some(idx) = pending {
+        app.on_commit_selected(&ctx, idx);
+    }
+}
+
+/// Collect the set of dataset keys flagged as outliers.
+///
+/// Returns an empty set when detection is disabled so the badge / recolour
+/// paths short-circuit without touching the cache.
+fn compute_outlier_key_set(app: &mut Dashboard) -> std::collections::HashSet<String> {
+    if !app.outlier_config.enabled {
+        return std::collections::HashSet::new();
+    }
+    let ordered = app.outlier_ordered_keys();
+    let reports = app.outlier_reports(&ordered);
+    reports
+        .iter()
+        .filter(|r| r.is_outlier)
+        .map(|r| r.dataset_key.clone())
+        .collect()
 }
 
 /// Truncate a string to at most `max` characters, appending `…` on overflow.
@@ -554,6 +1175,21 @@ fn render_chart_options(app: &mut Dashboard, ui: &mut Ui) {
                             PlotType::PerformanceProfile,
                             "Performance Profile",
                         );
+                        ui.selectable_value(
+                            &mut app.plot_config.plot_type,
+                            PlotType::Comparison,
+                            "Comparison (A vs B)",
+                        );
+                        ui.selectable_value(
+                            &mut app.plot_config.plot_type,
+                            PlotType::LineTimeseries,
+                            "Line Timeseries",
+                        );
+                        ui.selectable_value(
+                            &mut app.plot_config.plot_type,
+                            PlotType::StackedBar,
+                            "Stacked Bar",
+                        );
                     });
                 ui.end_row();
 
@@ -561,6 +1197,21 @@ fn render_chart_options(app: &mut Dashboard, ui: &mut Ui) {
             });
     });
     ui.add_space(5.0);
+
+    if app.plot_config.plot_type == PlotType::Comparison {
+        render_comparison_controls(app, ui);
+        ui.add_space(5.0);
+    }
+
+    if app.plot_config.plot_type == PlotType::LineTimeseries {
+        render_timeseries_controls(app, ui);
+        ui.add_space(5.0);
+    }
+
+    if app.plot_config.plot_type == PlotType::StackedBar {
+        render_stacked_bar_controls(app, ui);
+        ui.add_space(5.0);
+    }
 
     if app.plot_config.plot_type == PlotType::Scatter {
         ui.checkbox(

@@ -22,9 +22,19 @@ struct Cli {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
-    /// Log-normal multiplicative noise sigma applied to benchmark times.
-    #[arg(long, default_value_t = 0.08)]
+    /// Multiplicative scaling factor on the per-format base log-normal noise
+    /// sigma. The base sigma (0.40) is multiplied by per-format weights inside
+    /// the generator, then by this flag. Default `1.0` reproduces the
+    /// "real-looking" spread the redesign targets; lower values (e.g. 0.25)
+    /// produce a tight, "ideal-machine" look.
+    #[arg(long, default_value_t = 1.0)]
     noise_stddev: f64,
+
+    /// Probability that any given matrix receives a per-format anomaly hit
+    /// (one random format slowed by a heavy log-normal factor). 0.0 disables
+    /// anomalies, 1.0 forces an anomaly on every matrix.
+    #[arg(long, default_value_t = 0.10)]
+    anomaly_rate: f64,
 
     /// Real git SHA to name the output file after. Enables single-commit mode.
     /// When provided, output is `<out>/bench_<sha7>.json` + manifest upsert.
@@ -67,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         commit_author: cli.author,
         commit_date: cli.date,
         commit_message: cli.message,
+        anomaly_rate: cli.anomaly_rate,
     };
 
     let n = run(&config)?;

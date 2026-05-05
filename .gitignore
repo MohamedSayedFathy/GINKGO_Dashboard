@@ -31,5 +31,8 @@ file.json
 # Local datagen output (CI writes to /benchmarks, not /fixtures)
 /fixtures/
 
+# Local exports from the SVG/PDF "Save As" buttons
+/exports/
+
 # Claude Code local machine settings
 .claude/

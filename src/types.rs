@@ -8,6 +8,25 @@ pub enum DataMode {
 pub enum PlotType {
     Scatter,
     PerformanceProfile,
+    Comparison,
+    /// Trend a single format's aggregated metric across every loaded dataset,
+    /// ordered by commit date when a git repo is loaded.
+    LineTimeseries,
+    /// Per-problem storage-format breakdown within a single dataset.
+    StackedBar,
+}
+
+/// Scalar aggregation kernel applied over a dataset's problems when reducing
+/// them to one point on the line timeseries plot.
+///
+/// `GeometricMean` rejects non-positive values (they're undefined in log
+/// space) and reports the skip count via `log::debug` rather than returning
+/// silently-nan outputs.
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub enum AggregationKind {
+    Mean,
+    Median,
+    GeometricMean,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
