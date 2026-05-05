@@ -8,6 +8,13 @@
   },
   {
     "author": "Mohamed Ghayad <mohamed.sayed.ghayad@gmail.com>",
+    "date": "2026-05-05T17:45:54+02:00",
+    "file": "bench_9023d6c.json",
+    "message": "feat: add comparisons, more plots, switcher, outliers, vector export; redesign datagen",
+    "sha": "9023d6cd03a33046c4dce0a6a4958ac80bae7879"
+  },
+  {
+    "author": "Mohamed Ghayad <mohamed.sayed.ghayad@gmail.com>",
     "date": "2026-04-22T09:25:42+02:00",
     "file": "bench_bfa96ba.json",
     "message": "Add datagen, CI pipeline, WASM deploy, and custom-formula Y-axis",
